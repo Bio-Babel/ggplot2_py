@@ -52,6 +52,7 @@ from ggplot2_py.layer import Layer, layer, is_layer
 # Plot core
 # ---------------------------------------------------------------------------
 from ggplot2_py.plot import (
+    GGPlot,
     ggplot,
     is_ggplot,
     ggplot_build,

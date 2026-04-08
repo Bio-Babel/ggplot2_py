@@ -787,14 +787,11 @@ class ScaleContinuous(Scale):
         if len(uniq) == 0:
             return np.full_like(x_arr, self.na_value)
         pal = np.asarray(self.palette(uniq))
-        # Map back
-        indices = np.searchsorted(np.sort(uniq), x_rescaled)
-        sorted_uniq = np.sort(uniq)
-        sorted_pal_order = np.argsort(uniq)
-        pal_sorted = pal[sorted_pal_order] if len(pal) == len(uniq) else pal
 
-        # Simple approach: use match
-        scaled = np.full_like(x_arr, self.na_value, dtype=float)
+        # Determine output dtype: colour strings need object dtype
+        out_dtype = pal.dtype if pal.dtype.kind in ("U", "S", "O") else float
+        scaled = np.full(len(x_arr), self.na_value, dtype=out_dtype)
+
         for i, u in enumerate(uniq):
             mask = x_rescaled == u
             if np.any(mask):
@@ -831,7 +828,7 @@ class ScaleContinuous(Scale):
             limits = self.get_limits()
         if range is None:
             range = limits
-        return self.rescaler(x, _from=range)
+        return self.rescaler(x, from_range=range)
 
     def get_limits(self) -> np.ndarray:
         if self.is_empty():
@@ -1032,8 +1029,8 @@ class ScaleContinuous(Scale):
         else:
             major_arr = None
 
-        major_n = rescale(major_arr, _from=range) if major_arr is not None else None
-        minor_n = rescale(minor, _from=range) if minor is not None else None
+        major_n = rescale(major_arr, from_range=range) if major_arr is not None else None
+        minor_n = rescale(minor, from_range=range) if minor is not None else None
 
         return {
             "range": range,
@@ -1158,7 +1155,7 @@ class ScaleDiscrete(Scale):
         x_arr = np.asarray(x)
         limits_str = [str(l) for l in limits]
         matched = np.array([limits_str.index(str(v)) + 1 if str(v) in limits_str else np.nan for v in x_arr])
-        return rescale(matched, _from=range)
+        return rescale(matched, from_range=range)
 
     def dimension(
         self,
@@ -1243,7 +1240,7 @@ class ScaleDiscrete(Scale):
         labels = self.get_labels(major)
         major_mapped = self.map(major)
         major_mapped = major_mapped[~np.isnan(major_mapped.astype(float))]
-        major_n = rescale(major_mapped, _from=range) if range is not None else None
+        major_n = rescale(major_mapped, from_range=range) if range is not None else None
         return {
             "range": range,
             "labels": labels,
@@ -1351,7 +1348,7 @@ class ScaleBinned(Scale):
             limits = self.get_limits()
         if range is None:
             range = limits
-        return self.rescaler(x, _from=range)
+        return self.rescaler(x, from_range=range)
 
     def dimension(
         self,

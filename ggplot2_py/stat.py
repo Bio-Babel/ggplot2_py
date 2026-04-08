@@ -36,7 +36,7 @@ from ggplot2_py._utils import (
     empty,
     has_groups,
 )
-from ggplot2_py.aes import aes, Mapping, standardise_aes_names
+from ggplot2_py.aes import aes, Mapping, standardise_aes_names, AfterStat
 
 __all__ = [
     # Base class
@@ -1928,13 +1928,13 @@ class StatCount(Stat):
     required_aes : list
         ``["x|y"]``
     default_aes : dict
-        ``weight=1``
+        ``y=after_stat(count), weight=1``
     dropped_aes : list
         ``["weight"]``
     """
 
     required_aes: List[str] = ["x|y"]
-    default_aes: Dict[str, Any] = {"weight": 1}
+    default_aes: Dict[str, Any] = {"y": AfterStat("count"), "weight": 1}
     dropped_aes: List[str] = ["weight"]
     extra_params: List[str] = ["na_rm", "orientation"]
 

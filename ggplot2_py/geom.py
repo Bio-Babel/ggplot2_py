@@ -91,10 +91,29 @@ except ImportError:
     pass
 
 try:
-    from scales import alpha as scales_alpha
+    from scales import alpha as _scales_alpha_raw
 except ImportError:
-    def scales_alpha(colour, alpha):
+    def _scales_alpha_raw(colour, alpha):
         return colour
+
+import re as _re
+
+def _r_col_to_mpl(c):
+    """Convert R-style grey names to RGB tuples for matplotlib."""
+    if isinstance(c, str):
+        m = _re.match(r'^gr[ae]y(\d{1,3})$', c)
+        if m:
+            v = int(m.group(1)) / 100.0
+            return f"#{int(v*255):02x}{int(v*255):02x}{int(v*255):02x}"
+    return c
+
+def scales_alpha(colour, alpha):
+    """Apply alpha to colours, converting R colour names first."""
+    if isinstance(colour, (list, np.ndarray)):
+        colour = [_r_col_to_mpl(c) for c in colour]
+    elif isinstance(colour, str):
+        colour = _r_col_to_mpl(colour)
+    return _scales_alpha_raw(colour, alpha)
 
 __all__ = [
     # Base class
@@ -456,7 +475,9 @@ class Geom(GGProto):
             if panel_data.empty:
                 grobs.append(null_grob())
                 continue
-            panel_params = layout.panel_params[panel_id]
+            # PANEL is 1-based, panel_params list is 0-based
+            idx = int(panel_id) - 1 if isinstance(panel_id, (int, np.integer)) else panel_id
+            panel_params = layout.panel_params[idx]
             grobs.append(self.draw_panel(panel_data, panel_params, coord, **params))
         return grobs
 

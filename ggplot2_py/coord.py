@@ -248,12 +248,11 @@ class Coord(GGProto):
         """
         layout = layout.copy()
         scales = layout[["SCALE_X", "SCALE_Y"]]
-        unique_scales = scales.drop_duplicates()
-        # Create COORD identifier for unique scale combinations
-        layout["COORD"] = pd.merge(
-            scales.reset_index(), unique_scales.reset_index(drop=True).reset_index(),
-            on=["SCALE_X", "SCALE_Y"], how="left"
-        )["index"].values + 1
+        unique_scales = scales.drop_duplicates().reset_index(drop=True)
+        unique_scales = unique_scales.copy()
+        unique_scales["COORD"] = range(1, len(unique_scales) + 1)
+        layout = layout.drop(columns="COORD", errors="ignore")
+        layout = pd.merge(layout, unique_scales, on=["SCALE_X", "SCALE_Y"], how="left")
         return layout
 
     # -- panel params --------------------------------------------------------

@@ -360,7 +360,23 @@ class Facet(GGProto):
         data : list of DataFrame
         params : dict
         """
-        pass
+        for layer_data in data:
+            if layer_data is None or (hasattr(layer_data, "empty") and layer_data.empty):
+                continue
+            if "PANEL" not in layer_data.columns:
+                continue
+            for _, row in layout.iterrows():
+                panel_id = row["PANEL"]
+                sx_idx = int(row["SCALE_X"]) - 1
+                sy_idx = int(row["SCALE_Y"]) - 1
+                mask = layer_data["PANEL"] == panel_id
+                panel_data = layer_data.loc[mask]
+                if panel_data.empty:
+                    continue
+                if x_scales and sx_idx < len(x_scales):
+                    x_scales[sx_idx].train_df(panel_data)
+                if y_scales and sy_idx < len(y_scales):
+                    y_scales[sy_idx].train_df(panel_data)
 
     def finish_data(
         self,
@@ -401,7 +417,7 @@ class Facet(GGProto):
 
         Parameters
         ----------
-        panels : list of grobs
+        panels : list of grobs (per-layer, each containing per-panel grobs)
         layout : pd.DataFrame
         x_scales, y_scales : list
         ranges : list
@@ -414,8 +430,40 @@ class Facet(GGProto):
         -------
         gtable
         """
-        from grid_py import null_grob
-        return null_grob()
+        from grid_py import GTree, GList, null_grob
+        from gtable_py import Gtable, gtable_add_grob
+        from grid_py import Unit as unit
+
+        nrow = int(layout["ROW"].max()) if len(layout) > 0 else 1
+        ncol = int(layout["COL"].max()) if len(layout) > 0 else 1
+
+        gt = Gtable(
+            widths=unit([1] * ncol, "null"),
+            heights=unit([1] * nrow, "null"),
+            name="layout",
+        )
+
+        for _, row_info in layout.iterrows():
+            panel_id = int(row_info["PANEL"])
+            r = int(row_info["ROW"])
+            c = int(row_info["COL"])
+            panel_idx = panel_id - 1
+
+            panel_grobs = []
+            for layer_grobs in panels:
+                if isinstance(layer_grobs, list) and panel_idx < len(layer_grobs):
+                    panel_grobs.append(layer_grobs[panel_idx])
+                elif not isinstance(layer_grobs, list) and layer_grobs is not None:
+                    panel_grobs.append(layer_grobs)
+
+            if panel_grobs:
+                content = GTree(
+                    children=GList(*panel_grobs),
+                    name=f"panel-{panel_id}",
+                )
+                gt = gtable_add_grob(gt, content, t=r, l=c, name=f"panel-{r}-{c}")
+
+        return gt
 
     def draw_labels(
         self,
@@ -501,11 +549,37 @@ class FacetNull(Facet):
         theme: Any,
         params: Dict[str, Any],
     ) -> Any:
-        """Build a simple single-panel gtable."""
-        from grid_py import null_grob
-        if panels:
-            return panels[0]
-        return null_grob()
+        """Build a single-panel gtable from all layer grobs."""
+        from grid_py import GTree, GList, null_grob
+        from gtable_py import Gtable, gtable_add_grob
+        from grid_py import Unit as unit
+
+        # Collect all grobs for panel 1 (index 0 from each layer)
+        panel_grobs = []
+        for layer_grobs in panels:
+            if isinstance(layer_grobs, list):
+                if len(layer_grobs) > 0:
+                    panel_grobs.append(layer_grobs[0])
+            elif layer_grobs is not None:
+                panel_grobs.append(layer_grobs)
+
+        if not panel_grobs:
+            return null_grob()
+
+        # Wrap all panel grobs in a single GTree
+        panel_content = GTree(
+            children=GList(*panel_grobs),
+            name="panel-1",
+        )
+
+        # Create a 1x1 Gtable holding the panel
+        gt = Gtable(
+            widths=unit([1], "null"),
+            heights=unit([1], "null"),
+            name="layout",
+        )
+        gt = gtable_add_grob(gt, panel_content, t=1, l=1, name="panel-1-1")
+        return gt
 
 
 # ---------------------------------------------------------------------------

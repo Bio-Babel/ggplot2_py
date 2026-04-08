@@ -102,6 +102,31 @@ def _validate_subclass(
     )
 
 
+def _resolve_class(name: str, prefix: str) -> Any:
+    """Resolve a string like ``"identity"`` to a ggproto class.
+
+    Looks up ``{prefix}{Name}`` (e.g. ``StatIdentity``) in the appropriate
+    module (``ggplot2_py.stat``, ``ggplot2_py.geom``, ``ggplot2_py.position``).
+    """
+    import importlib
+
+    module_map = {"Stat": "ggplot2_py.stat", "Geom": "ggplot2_py.geom", "Position": "ggplot2_py.position"}
+    mod = importlib.import_module(module_map[prefix])
+
+    # Try e.g. StatIdentity, GeomPoint, PositionDodge
+    class_name = prefix + name.replace("_", " ").title().replace(" ", "")
+    cls = getattr(mod, class_name, None)
+    if cls is not None:
+        return cls
+
+    # Fallback: try exact attribute name
+    cls = getattr(mod, name, None)
+    if cls is not None:
+        return cls
+
+    cli_abort(f"Cannot find {prefix.lower()} called {name!r}.")
+
+
 def _split_params(
     params: Dict[str, Any],
     geom: Any,
@@ -435,13 +460,13 @@ class Layer(GGProto):
         new_cols: Dict[str, Any] = {}
         for aes_name, aes_val in aesthetics.items():
             if isinstance(aes_val, AfterStat):
-                col = aes_val.stat
+                col = aes_val.x
                 if col in data.columns:
                     new_cols[aes_name] = data[col].values
             elif isinstance(aes_val, Stage):
                 col = getattr(aes_val, "start", None)
-                if isinstance(col, AfterStat) and col.stat in data.columns:
-                    new_cols[aes_name] = data[col.stat].values
+                if isinstance(col, AfterStat) and col.x in data.columns:
+                    new_cols[aes_name] = data[col.x].values
 
         for k, v in new_cols.items():
             data[k] = v
@@ -736,9 +761,34 @@ def layer(
     if position is None:
         position = "identity"
 
-    # NOTE: full string-to-class resolution requires a registry that is
-    # populated by the geom/stat/position modules.  For now we accept both
-    # strings (deferred resolution) and ggproto objects.
+    # Resolve dict-form position (e.g. {"name": "jitter", "width": 0.2})
+    if isinstance(position, dict):
+        pos_name = position.pop("name", "identity")
+        pos_kwargs = position
+        position = pos_name
+    else:
+        pos_kwargs = {}
+
+    # Resolve string names to ggproto classes and ensure instances
+    if isinstance(stat, str):
+        stat = _resolve_class(stat, "Stat")
+    if isinstance(position, str):
+        position = _resolve_class(position, "Position")
+    if isinstance(geom, str):
+        geom = _resolve_class(geom, "Geom")
+
+    # Ensure we have instances, not classes (methods need bound self)
+    if isinstance(stat, type):
+        stat = stat()
+    if isinstance(position, type):
+        pos_inst = position()
+        # Apply any dict-form position kwargs
+        for k, v in pos_kwargs.items():
+            if v is not None:
+                setattr(pos_inst, k, v)
+        position = pos_inst
+    if isinstance(geom, type):
+        geom = geom()
 
     # Split params
     geom_params: Dict[str, Any]

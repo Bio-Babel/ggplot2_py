@@ -111,7 +111,7 @@ def remove_missing(
 # Numeric helpers
 # ---------------------------------------------------------------------------
 
-def resolution(x: Any, zero: bool = True) -> float:
+def resolution(x: Any, zero: bool = True, discrete: bool = False) -> float:
     """Compute the resolution of a numeric vector.
 
     The resolution is the smallest non-zero difference between adjacent
@@ -130,6 +130,8 @@ def resolution(x: Any, zero: bool = True) -> float:
     float
         The resolution.
     """
+    if discrete:
+        return 1.0
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
     if len(x) == 0:

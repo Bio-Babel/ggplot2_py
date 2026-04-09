@@ -257,7 +257,7 @@ def add_theme(t1: Theme, t2: Theme) -> Theme:
     Parameters
     ----------
     t1 : Theme
-        The base theme.
+        The base theme (may also be a plain dict for the initial plot theme).
     t2 : Theme
         The theme to add (its elements override *t1*'s).
 
@@ -267,6 +267,8 @@ def add_theme(t1: Theme, t2: Theme) -> Theme:
         A new theme with merged elements.
     """
     if t2 is None:
+        if isinstance(t1, dict):
+            return Theme(t1)
         return t1.copy()
 
     # If t2 is complete, it replaces t1 entirely
@@ -275,6 +277,12 @@ def add_theme(t1: Theme, t2: Theme) -> Theme:
 
     if t1 is None:
         return t2.copy()
+
+    # If t1 is a plain dict (e.g. initial plot theme), wrap it in a Theme
+    # so it has .validate, .copy(), .keys() etc.  Mirrors R's
+    # ``if (!is_theme(t1) && is.list(t1)) t1 <- theme(!!!t1)``
+    if isinstance(t1, dict) and not isinstance(t1, Theme):
+        t1 = Theme(t1)
 
     result = t1.copy()
     for item in t2.keys():

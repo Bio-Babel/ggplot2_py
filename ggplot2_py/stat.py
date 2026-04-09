@@ -1753,7 +1753,11 @@ class StatBin(Stat):
     """
 
     required_aes: List[str] = ["x|y"]
-    default_aes: Dict[str, Any] = {"weight": 1}
+    default_aes: Dict[str, Any] = {
+        "x": AfterStat("count"),
+        "y": AfterStat("count"),
+        "weight": 1,
+    }
     dropped_aes: List[str] = ["weight"]
     extra_params: List[str] = ["na_rm", "orientation"]
 
@@ -2068,7 +2072,11 @@ class StatDensity(Stat):
     """
 
     required_aes: List[str] = ["x|y"]
-    default_aes: Dict[str, Any] = {"fill": None, "weight": None}
+    default_aes: Dict[str, Any] = {
+        "y": AfterStat("density"),
+        "fill": None,
+        "weight": None,
+    }
     dropped_aes: List[str] = ["weight"]
     extra_params: List[str] = ["na_rm", "orientation"]
 
@@ -2407,25 +2415,17 @@ class StatSmooth(Stat):
         pd.DataFrame
         """
         from scipy.interpolate import interp1d
+        import statsmodels.api as sm
 
-        try:
-            import statsmodels.api as sm
-            lowess = sm.nonparametric.lowess
-            x = data["x"].values
-            y = data["y"].values
-            result_raw = lowess(y, x, frac=span, return_sorted=True)
-            f = interp1d(
-                result_raw[:, 0], result_raw[:, 1],
-                kind="linear", bounds_error=False, fill_value="extrapolate",
-            )
-            y_pred = f(xseq)
-        except ImportError:
-            # Fallback to polynomial fit
-            x = data["x"].values
-            y = data["y"].values
-            deg = min(3, len(x) - 1)
-            coeffs = np.polyfit(x, y, deg=deg)
-            y_pred = np.polyval(coeffs, xseq)
+        lowess = sm.nonparametric.lowess
+        x = data["x"].values
+        y = data["y"].values
+        result_raw = lowess(y, x, frac=span, return_sorted=True)
+        f = interp1d(
+            result_raw[:, 0], result_raw[:, 1],
+            kind="linear", bounds_error=False, fill_value="extrapolate",
+        )
+        y_pred = f(xseq)
 
         result = pd.DataFrame({"x": xseq, "y": y_pred})
 
@@ -5708,23 +5708,13 @@ class StatQuantile(Stat):
         np.ndarray
             Predicted values.
         """
-        try:
-            import statsmodels.formula.api as smf
-            df = pd.DataFrame({"x": x, "y": y})
-            mod = smf.quantreg("y ~ x", df)
-            res = mod.fit(q=tau, max_iter=1000)
-            pred_df = pd.DataFrame({"x": xseq})
-            return res.predict(pred_df)
-        except ImportError:
-            # Fallback: interpolate between quantile-adjusted values
-            order = np.argsort(x)
-            x_sorted = x[order]
-            y_sorted = y[order]
-            # Simple approach: fit linear regression then shift
-            coeffs = np.polyfit(x, y, deg=1)
-            residuals = y - np.polyval(coeffs, x)
-            shift = np.percentile(residuals, tau * 100)
-            return np.polyval(coeffs, xseq) + shift
+        import statsmodels.formula.api as smf
+
+        df = pd.DataFrame({"x": x, "y": y})
+        mod = smf.quantreg("y ~ x", df)
+        res = mod.fit(q=tau, max_iter=1000)
+        pred_df = pd.DataFrame({"x": xseq})
+        return res.predict(pred_df)
 
 
 def stat_quantile(
@@ -5811,24 +5801,18 @@ class StatSf(Stat):
         if "geometry" not in data.columns:
             return data
 
-        try:
-            import geopandas as gpd
-            if hasattr(data, "total_bounds"):
-                bounds = data.total_bounds
-            else:
-                geom = gpd.GeoSeries(data["geometry"])
-                bounds = geom.total_bounds
-            data = data.copy()
-            data["xmin"] = bounds[0]
-            data["ymin"] = bounds[1]
-            data["xmax"] = bounds[2]
-            data["ymax"] = bounds[3]
-        except (ImportError, Exception):
-            data = data.copy()
-            data["xmin"] = 0
-            data["ymin"] = 0
-            data["xmax"] = 1
-            data["ymax"] = 1
+        import geopandas as gpd
+
+        if hasattr(data, "total_bounds"):
+            bounds = data.total_bounds
+        else:
+            geom = gpd.GeoSeries(data["geometry"])
+            bounds = geom.total_bounds
+        data = data.copy()
+        data["xmin"] = bounds[0]
+        data["ymin"] = bounds[1]
+        data["xmax"] = bounds[2]
+        data["ymax"] = bounds[3]
 
         return data
 
@@ -5869,22 +5853,18 @@ class StatSfCoordinates(Stat):
         if "geometry" not in data.columns:
             return data
 
-        try:
-            import geopandas as gpd
-            geom = gpd.GeoSeries(data["geometry"])
+        import geopandas as gpd
 
-            if fun_geometry is not None:
-                points = fun_geometry(geom)
-            else:
-                points = geom.centroid
+        geom = gpd.GeoSeries(data["geometry"])
 
-            data = data.copy()
-            data["x"] = points.x.values
-            data["y"] = points.y.values
-        except (ImportError, Exception):
-            data = data.copy()
-            data["x"] = 0
-            data["y"] = 0
+        if fun_geometry is not None:
+            points = fun_geometry(geom)
+        else:
+            points = geom.centroid
+
+        data = data.copy()
+        data["x"] = points.x.values
+        data["y"] = points.y.values
 
         return data
 

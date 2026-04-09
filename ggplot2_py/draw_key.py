@@ -17,26 +17,23 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
-try:
-    from grid_py import (
-        points_grob,
-        rect_grob,
-        segments_grob,
-        lines_grob,
-        polygon_grob,
-        text_grob,
-        circle_grob,
-        null_grob,
-        Gpar,
-        Unit,
-        grob_tree,
-        GTree,
-        Viewport,
-        roundrect_grob,
-        GList,
-    )
-except ImportError:
-    pass
+from grid_py import (
+    points_grob,
+    rect_grob,
+    segments_grob,
+    lines_grob,
+    polygon_grob,
+    text_grob,
+    circle_grob,
+    null_grob,
+    Gpar,
+    Unit,
+    grob_tree,
+    GTree,
+    Viewport,
+    roundrect_grob,
+    GList,
+)
 
 from scales import alpha as _scales_alpha
 

@@ -102,11 +102,40 @@ def _validate_subclass(
     )
 
 
+def _camelize(x: str, first: bool = False) -> str:
+    """Convert a snake_case string to CamelCase (R's ``camelize()``).
+
+    Unlike Python's ``str.title()``, this only capitalises the letter
+    immediately after an underscore, preserving the case of characters
+    after digits (e.g. ``"bin2d"`` → ``"Bin2d"``, not ``"Bin2D"``).
+
+    Parameters
+    ----------
+    x : str
+        The snake_case name (e.g. ``"bin2d"``, ``"count"``, ``"qq_line"``).
+    first : bool
+        If ``True``, also capitalise the very first character.
+
+    Returns
+    -------
+    str
+        CamelCase result.
+    """
+    import re
+    x = re.sub(r"_(.)", lambda m: m.group(1).upper(), x)
+    if first:
+        x = x[0].upper() + x[1:] if x else x
+    return x
+
+
 def _resolve_class(name: str, prefix: str) -> Any:
     """Resolve a string like ``"identity"`` to a ggproto class.
 
     Looks up ``{prefix}{Name}`` (e.g. ``StatIdentity``) in the appropriate
     module (``ggplot2_py.stat``, ``ggplot2_py.geom``, ``ggplot2_py.position``).
+
+    Uses R-compatible ``camelize()`` so that names with digits are handled
+    correctly (e.g. ``"bin2d"`` → ``StatBin2d``, not ``StatBin2D``).
     """
     import importlib
 
@@ -114,7 +143,7 @@ def _resolve_class(name: str, prefix: str) -> Any:
     mod = importlib.import_module(module_map[prefix])
 
     # Try e.g. StatIdentity, GeomPoint, PositionDodge
-    class_name = prefix + name.replace("_", " ").title().replace(" ", "")
+    class_name = prefix + _camelize(name, first=True)
     cls = getattr(mod, class_name, None)
     if cls is not None:
         return cls

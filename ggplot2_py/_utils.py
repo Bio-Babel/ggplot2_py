@@ -487,11 +487,7 @@ def width_cm(x: Any) -> Union[float, np.ndarray]:
     float or np.ndarray
         The width in centimetres.
     """
-    try:
-        from grid_py import Unit, convert_unit
-    except ImportError:
-        # Fallback: treat as numeric cm.
-        return float(x) if np.isscalar(x) else np.asarray(x, dtype=float)
+    from grid_py import Unit, convert_unit
 
     if isinstance(x, Unit):
         result = convert_unit(x, "cm", axisFrom="x", typeFrom="dimension", valueOnly=True)
@@ -513,10 +509,7 @@ def height_cm(x: Any) -> Union[float, np.ndarray]:
     float or np.ndarray
         The height in centimetres.
     """
-    try:
-        from grid_py import Unit, convert_unit
-    except ImportError:
-        return float(x) if np.isscalar(x) else np.asarray(x, dtype=float)
+    from grid_py import Unit, convert_unit
 
     if isinstance(x, Unit):
         result = convert_unit(x, "cm", axisFrom="y", typeFrom="dimension", valueOnly=True)

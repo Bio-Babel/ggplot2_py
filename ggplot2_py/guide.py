@@ -358,17 +358,19 @@ class Guide(GGProto):
 
         params["aesthetic"] = aesthetic or ""
 
-        # Extract key
-        key = self.extract_key(scale, aesthetic or "", **kwargs)
+        # Extract key — mirrors R's inject(self$extract_key(scale, !!!params))
+        key = self.extract_key(scale, **{k: v for k, v in params.items()
+                                         if k != "key"}, **kwargs)
         if key is not None and key.empty:
             return None
         params["key"] = key
 
-        # Extract decor
+        # Extract decor — mirrors R's inject(self$extract_decor(scale, !!!params))
+        # Pass scale as positional, then splat all params as kwargs (except
+        # "decor" itself to avoid recursion).
         params["decor"] = self.extract_decor(
-            scale, aesthetic or "",
-            key=key, **{k: v for k, v in params.items()
-                        if k not in ("key", "decor")},
+            scale, **{k: v for k, v in params.items()
+                      if k != "decor"},
         )
 
         # Post-process

@@ -142,27 +142,37 @@ class TestGeomPointDefaults:
 
 
 class TestGeomStatDefaults:
-    """Test default stat assignments on geoms."""
+    """Test default stat assignments on geoms.
+
+    In R, ``layer$stat`` stores a ggproto **object** (e.g. ``StatCount``),
+    not a string.  The Python port mirrors this: ``layer.stat`` is a
+    ggproto instance.  We verify via ``isinstance`` checks.
+    """
 
     def test_geom_bar_default_stat_is_count(self):
+        from ggplot2_py.stat import StatCount
         layer = geom_bar()
-        assert layer.stat == "count"
+        assert isinstance(layer.stat, StatCount)
 
     def test_geom_histogram_default_stat_is_bin(self):
+        from ggplot2_py.stat import StatBin
         layer = geom_histogram()
-        assert layer.stat == "bin"
+        assert isinstance(layer.stat, StatBin)
 
     def test_geom_point_default_stat_is_identity(self):
+        from ggplot2_py.stat import StatIdentity
         layer = geom_point()
-        assert layer.stat == "identity"
+        assert isinstance(layer.stat, StatIdentity)
 
     def test_geom_smooth_default_stat_is_smooth(self):
+        from ggplot2_py.stat import StatSmooth
         layer = geom_smooth()
-        assert layer.stat == "smooth"
+        assert isinstance(layer.stat, StatSmooth)
 
     def test_geom_boxplot_default_stat_is_boxplot(self):
+        from ggplot2_py.stat import StatBoxplot
         layer = geom_boxplot()
-        assert layer.stat == "boxplot"
+        assert isinstance(layer.stat, StatBoxplot)
 
 
 class TestIsGeom:

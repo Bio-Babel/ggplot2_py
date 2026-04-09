@@ -334,7 +334,8 @@ def expand_range4(
     limits : array-like
         Length-2 numeric range.
     expand : array-like
-        2- or 4-element expansion vector.
+        2- or 4-element expansion vector ``[mult_lo, add_lo, mult_hi, add_hi]``
+        or ``[mult, add]`` (duplicated for both sides).
 
     Returns
     -------
@@ -349,9 +350,15 @@ def expand_range4(
         return np.array([-np.inf, np.inf])
     if len(expand) == 2:
         expand = np.tile(expand, 2)
-    # expand[0]=mult_lower, expand[1]=add_lower, expand[2]=mult_upper, expand[3]=add_upper
-    result = expand_range(limits, expand[[0, 2]], expand[[1, 3]])
-    return np.asarray(result)
+    # expand = [mult_lower, add_lower, mult_upper, add_upper]
+    # Compute expansion inline to handle asymmetric mult/add correctly.
+    # scales.expand_range only accepts scalar mul/add, so we compute manually.
+    extent = limits[1] - limits[0]
+    if extent == 0:
+        extent = 1.0
+    lower = limits[0] - extent * expand[0] - expand[1]
+    upper = limits[1] + extent * expand[2] + expand[3]
+    return np.array([lower, upper])
 
 
 def default_expansion(
@@ -890,7 +897,7 @@ class ScaleContinuous(Scale):
 
         breaks = self.breaks
         if is_waiver(breaks):
-            breaks = transformation.breaks
+            breaks = transformation.breaks_func
 
         if breaks is None:
             return None
@@ -951,9 +958,11 @@ class ScaleContinuous(Scale):
             if b is None:
                 return None
             transformation = self.get_transformation()
+            if not callable(getattr(transformation, "minor_breaks_func", None)):
+                return None
             b_finite = np.asarray(b, dtype=float)
             b_finite = b_finite[np.isfinite(b_finite)]
-            return np.asarray(transformation.minor_breaks(b_finite, limits, n))
+            return np.asarray(transformation.minor_breaks_func(b_finite, limits, n))
         elif callable(minor):
             transformation = self.get_transformation()
             inv_limits = transformation.inverse(limits)
@@ -987,7 +996,7 @@ class ScaleContinuous(Scale):
         if labels is None:
             return None
         if is_waiver(labels):
-            return list(transformation.format(breaks_data))
+            return list(transformation.format_func(breaks_data))
         if callable(labels):
             return list(labels(breaks_data))
         return list(labels)
@@ -1393,9 +1402,9 @@ class ScaleBinned(Scale):
             if self.nice_breaks:
                 n = self.n_breaks or 5
                 try:
-                    result = transformation.breaks(inv_limits_sorted, n=n)
+                    result = transformation.breaks_func(inv_limits_sorted, n=n)
                 except TypeError:
-                    result = transformation.breaks(inv_limits_sorted)
+                    result = transformation.breaks_func(inv_limits_sorted)
             else:
                 n = self.n_breaks or 5
                 result = np.linspace(inv_limits_sorted[0], inv_limits_sorted[1], n + 2)[1:-1]
@@ -1427,7 +1436,7 @@ class ScaleBinned(Scale):
         if labels is None:
             return None
         if is_waiver(labels):
-            return list(transformation.format(breaks_data))
+            return list(transformation.format_func(breaks_data))
         if callable(labels):
             return list(labels(breaks_data))
         return list(labels)
@@ -2381,7 +2390,7 @@ class AxisSecondary:
             self.breaks = scale.breaks
         if is_waiver(self.breaks):
             transformation = scale.get_transformation()
-            self.breaks = transformation.breaks
+            self.breaks = transformation.breaks_func
         if is_derived(self.labels):
             self.labels = scale.labels
         if is_derived(self.guide):
@@ -2434,6 +2443,7 @@ class AxisSecondary:
         temp_sc.labels = self.labels
         temp_sc.limits = new_range
         temp_sc.expand = np.array([0.0, 0.0])
+        temp_sc.minor_breaks = None  # no minor breaks for secondary axis
         temp_sc.trans = transformation
         temp_sc.range = ContinuousRange()
         temp_sc.train(new_range)

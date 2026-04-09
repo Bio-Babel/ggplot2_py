@@ -44,30 +44,33 @@ class TestBarPlot:
     """Test bar plot construction."""
 
     def test_basic_bar(self, mpg):
+        from ggplot2_py.stat import StatCount
         p = ggplot(mpg, aes("class")) + geom_bar()
         assert is_ggplot(p)
         assert len(p.layers) == 1
-        assert p.layers[0].stat == "count"
+        assert isinstance(p.layers[0].stat, StatCount)
 
 
 class TestBoxplot:
     """Test boxplot construction."""
 
     def test_basic_boxplot(self, mpg):
+        from ggplot2_py.stat import StatBoxplot
         p = ggplot(mpg, aes("class", "hwy")) + geom_boxplot()
         assert is_ggplot(p)
         assert len(p.layers) == 1
-        assert p.layers[0].stat == "boxplot"
+        assert isinstance(p.layers[0].stat, StatBoxplot)
 
 
 class TestHistogram:
     """Test histogram construction."""
 
     def test_basic_histogram(self, mpg):
+        from ggplot2_py.stat import StatBin
         p = ggplot(mpg, aes("hwy")) + geom_histogram(bins=30)
         assert is_ggplot(p)
         assert len(p.layers) == 1
-        assert p.layers[0].stat == "bin"
+        assert isinstance(p.layers[0].stat, StatBin)
 
 
 class TestMultiLayer:

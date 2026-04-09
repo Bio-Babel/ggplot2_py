@@ -62,39 +62,31 @@ from ggplot2_py.draw_key import (
 )
 
 # grid_py grob creation imports
-try:
-    from grid_py import (
-        points_grob,
-        rect_grob,
-        lines_grob,
-        segments_grob,
-        polygon_grob,
-        polyline_grob,
-        text_grob,
-        circle_grob,
-        raster_grob,
-        path_grob,
-        curve_grob,
-        null_grob,
-        Gpar,
-        Unit,
-        grob_tree,
-        GTree,
-        GList,
-        clip_grob,
-        Viewport,
-        edit_grob,
-        roundrect_grob,
-    )
-except ImportError:
-    # Fallback: will raise at draw-time if grid_py is truly missing.
-    pass
+from grid_py import (
+    points_grob,
+    rect_grob,
+    lines_grob,
+    segments_grob,
+    polygon_grob,
+    polyline_grob,
+    text_grob,
+    circle_grob,
+    raster_grob,
+    path_grob,
+    curve_grob,
+    null_grob,
+    Gpar,
+    Unit,
+    grob_tree,
+    GTree,
+    GList,
+    clip_grob,
+    Viewport,
+    edit_grob,
+    roundrect_grob,
+)
 
-try:
-    from scales import alpha as _scales_alpha_raw
-except ImportError:
-    def _scales_alpha_raw(colour, alpha):
-        return colour
+from scales import alpha as _scales_alpha_raw
 
 import re as _re
 
@@ -2587,8 +2579,150 @@ class GeomQuantile(GeomPath):
 # GeomSf and related
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# sf geometry type mapping (mirrors R's sf_types vector)
+# ---------------------------------------------------------------------------
+
+_SF_TYPES: Dict[str, str] = {
+    "Point": "point", "MultiPoint": "point",
+    "LineString": "line", "MultiLineString": "line",
+    "CircularString": "line", "CompoundCurve": "line",
+    "MultiCurve": "line", "Curve": "line",
+    "Polygon": "other", "MultiPolygon": "other",
+    "CurvePolygon": "other", "MultiSurface": "other",
+    "Surface": "other", "PolyhedralSurface": "other",
+    "TIN": "other", "Triangle": "other",
+    "GeometryCollection": "collection",
+    "Geometry": "other",
+}
+
+# R's .pt and .stroke constants
+_PT = 72.27 / 25.4   # ≈ 2.845
+_STROKE = 96 / 25.4  # ≈ 3.78
+
+
+def _sf_geometry_to_grobs(
+    geometry_series: Any,
+    colour: Any,
+    fill: Any,
+    linewidth: Any,
+    linetype: Any,
+    point_size: Any,
+    pch: Any,
+    lineend: str = "butt",
+    linejoin: str = "round",
+) -> Any:
+    """Convert a Series of shapely geometries to grid_py grobs.
+
+    This reimplements R's ``sf::st_as_grob()`` using shapely + grid_py.
+    Each geometry is rendered as the appropriate grob type:
+    - Point/MultiPoint → points_grob
+    - LineString/MultiLineString → polyline_grob / lines_grob
+    - Polygon/MultiPolygon → polygon_grob / path_grob
+
+    Returns a GTree containing all grobs.
+    """
+    from shapely.geometry import (
+        Point as ShapelyPoint,
+        MultiPoint as ShapelyMultiPoint,
+        LineString as ShapelyLineString,
+        MultiLineString as ShapelyMultiLineString,
+        Polygon as ShapelyPolygon,
+        MultiPolygon as ShapelyMultiPolygon,
+        GeometryCollection as ShapelyGeometryCollection,
+    )
+
+    children = []
+
+    for i, geom in enumerate(geometry_series):
+        if geom is None or geom.is_empty:
+            continue
+
+        # Per-row graphical parameters
+        col_i = colour[i] if hasattr(colour, "__getitem__") and len(colour) > i else colour
+        fill_i = fill[i] if hasattr(fill, "__getitem__") and len(fill) > i else fill
+        lwd_i = linewidth[i] if hasattr(linewidth, "__getitem__") and len(linewidth) > i else linewidth
+        lty_i = linetype[i] if hasattr(linetype, "__getitem__") and len(linetype) > i else linetype
+        sz_i = point_size[i] if hasattr(point_size, "__getitem__") and len(point_size) > i else point_size
+        pch_i = pch[i] if hasattr(pch, "__getitem__") and len(pch) > i else pch
+
+        gp = Gpar(
+            col=col_i, fill=fill_i, lwd=lwd_i, lty=lty_i,
+            lineend=lineend, linejoin=linejoin,
+        )
+
+        if isinstance(geom, (ShapelyPoint,)):
+            x, y = geom.x, geom.y
+            children.append(points_grob(
+                x=[x], y=[y], pch=int(pch_i) if pch_i is not None else 19,
+                size=Unit(float(sz_i) if sz_i is not None else 1, "char"),
+                gp=gp, name=f"sf_point_{i}",
+            ))
+
+        elif isinstance(geom, (ShapelyMultiPoint,)):
+            xs = [p.x for p in geom.geoms]
+            ys = [p.y for p in geom.geoms]
+            children.append(points_grob(
+                x=xs, y=ys, pch=int(pch_i) if pch_i is not None else 19,
+                size=Unit(float(sz_i) if sz_i is not None else 1, "char"),
+                gp=gp, name=f"sf_mpoint_{i}",
+            ))
+
+        elif isinstance(geom, (ShapelyLineString,)):
+            xs, ys = zip(*geom.coords) if len(geom.coords) > 0 else ([], [])
+            children.append(lines_grob(
+                x=list(xs), y=list(ys), gp=gp, name=f"sf_line_{i}",
+            ))
+
+        elif isinstance(geom, (ShapelyMultiLineString,)):
+            for j, line in enumerate(geom.geoms):
+                xs, ys = zip(*line.coords) if len(line.coords) > 0 else ([], [])
+                children.append(lines_grob(
+                    x=list(xs), y=list(ys), gp=gp,
+                    name=f"sf_mline_{i}_{j}",
+                ))
+
+        elif isinstance(geom, (ShapelyPolygon,)):
+            # Exterior ring
+            xs, ys = geom.exterior.coords.xy
+            children.append(polygon_grob(
+                x=list(xs), y=list(ys), gp=gp, name=f"sf_poly_{i}",
+            ))
+
+        elif isinstance(geom, (ShapelyMultiPolygon,)):
+            for j, poly in enumerate(geom.geoms):
+                xs, ys = poly.exterior.coords.xy
+                children.append(polygon_grob(
+                    x=list(xs), y=list(ys), gp=gp,
+                    name=f"sf_mpoly_{i}_{j}",
+                ))
+
+        elif isinstance(geom, (ShapelyGeometryCollection,)):
+            # Recurse into collection
+            sub_grobs = _sf_geometry_to_grobs(
+                list(geom.geoms),
+                colour=[col_i] * len(geom.geoms),
+                fill=[fill_i] * len(geom.geoms),
+                linewidth=[lwd_i] * len(geom.geoms),
+                linetype=[lty_i] * len(geom.geoms),
+                point_size=[sz_i] * len(geom.geoms),
+                pch=[pch_i] * len(geom.geoms),
+                lineend=lineend, linejoin=linejoin,
+            )
+            children.append(sub_grobs)
+
+    if not children:
+        return null_grob()
+
+    return grob_tree(*children, name="sf_geometries")
+
+
 class GeomSf(Geom):
-    """Simple features geom."""
+    """Simple features geom.
+
+    Draws different geometric objects depending on the geometry type:
+    points, lines, or polygons — mirroring R's ``geom_sf()``.
+    """
 
     required_aes: Tuple[str, ...] = ("geometry",)
     default_aes: Mapping = Mapping(
@@ -2615,14 +2749,72 @@ class GeomSf(Geom):
         na_rm: bool = True,
         **params: Any,
     ) -> Any:
-        """Draw sf geometries."""
+        """Draw sf geometries.
+
+        Mirrors R's ``GeomSf$draw_panel``: classifies each geometry
+        as point/line/other, computes per-type graphical parameters,
+        and renders via ``_sf_geometry_to_grobs``.
+        """
         coords = _coord_transform(coord, data, panel_params)
-        # sf rendering is delegated to the sf library
-        try:
-            import sf
-            return sf.st_as_grob(coords["geometry"])
-        except (ImportError, Exception):
+
+        if "geometry" not in coords.columns:
             return null_grob()
+
+        import shapely
+
+        n = len(coords)
+
+        # Classify geometry types (mirrors R's sf_types vector)
+        types = coords["geometry"].apply(
+            lambda g: _SF_TYPES.get(g.geom_type, "other") if g is not None else "other"
+        )
+        is_point = types == "point"
+        is_line = types == "line"
+        is_collection = types == "collection"
+
+        # Shape translation
+        shape = coords.get("shape", pd.Series([19] * n))
+        shape = shape.apply(
+            lambda s: translate_shape_string(s) if isinstance(s, str) else (s if s is not None else 19)
+        )
+
+        # Fill with alpha (mirrors R: fill_alpha for all, arrow.fill for lines)
+        fill_raw = coords.get("fill", pd.Series([np.nan] * n))
+        alpha_raw = coords.get("alpha", pd.Series([1.0] * n)).fillna(1.0)
+        fill_vals = _fill_alpha(fill_raw, alpha_raw)
+
+        # Colour with alpha for points and lines
+        colour = coords.get("colour", pd.Series(["black"] * n))
+
+        # Point size vs linewidth (R: point_size for points/collections,
+        # linewidth for everything else)
+        size_raw = coords.get("size", pd.Series([1.5] * n)).fillna(1.5)
+        lw_raw = coords.get("linewidth", pd.Series([0.5] * n)).fillna(0.5)
+        point_size = size_raw.copy()
+        point_size[~(is_point | is_collection)] = lw_raw[~(is_point | is_collection)]
+
+        # Stroke
+        stroke_raw = coords.get("stroke", pd.Series([0.5] * n)).fillna(0.5)
+        stroke_vals = stroke_raw * _STROKE / 2
+        font_size = point_size * _PT + stroke_vals
+
+        # Linewidth
+        linewidth = lw_raw * _PT
+        linewidth[is_point] = stroke_vals[is_point]
+
+        linetype = coords.get("linetype", pd.Series([1] * n))
+
+        return _sf_geometry_to_grobs(
+            coords["geometry"],
+            colour=colour.values,
+            fill=fill_vals if hasattr(fill_vals, '__len__') else [fill_vals] * n,
+            linewidth=linewidth.values,
+            linetype=linetype.values,
+            point_size=font_size.values,
+            pch=shape.values,
+            lineend=lineend,
+            linejoin=linejoin,
+        )
 
     def draw_key(self, data: Any, params: Dict[str, Any], size: Any = None) -> Any:
         legend_type = params.get("legend", "other")
@@ -2657,13 +2849,187 @@ class GeomRasterAnn(Geom):
         return null_grob()
 
 
-class GeomLogticks(Geom):
-    """Log-scale tick marks geom."""
+def _calc_logticks(
+    base: float = 10,
+    minpow: int = 0,
+    maxpow: int = 1,
+    start: float = 0.0,
+    shortend: float = 0.1,
+    midend: float = 0.2,
+    longend: float = 0.3,
+) -> pd.DataFrame:
+    """Compute log tick mark positions and lengths.
 
-    def draw_panel(self, data: pd.DataFrame = None, panel_params: Any = None,
-                   coord: Any = None, **params: Any) -> Any:
-        # Placeholder -- log ticks require scale information
-        return null_grob()
+    Mirrors R's ``calc_logticks()`` from ``annotation-logticks.R``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``value``, ``start``, ``end``.
+    """
+    ticks_per_base = int(base) - 1
+    reps = maxpow - minpow
+
+    if reps <= 0 or ticks_per_base <= 0:
+        return pd.DataFrame({"value": [base ** maxpow], "start": [start], "end": [longend]})
+
+    ticknums = np.tile(np.linspace(1, base - 1, ticks_per_base), reps)
+    powers = np.repeat(np.arange(minpow, maxpow), ticks_per_base)
+    ticks = ticknums * (base ** powers)
+    ticks = np.append(ticks, base ** maxpow)
+
+    tickend = np.full(len(ticks), shortend)
+    cycle_idx = (ticknums - 1).astype(int)
+    cycle_idx = np.append(cycle_idx, 0)
+
+    # Major ticks (at each power of base)
+    tickend[cycle_idx == 0] = longend
+
+    # Mid ticks (at base/2, e.g. 5 for base 10)
+    longtick_after = ticks_per_base // 2
+    tickend[cycle_idx == longtick_after] = midend
+
+    return pd.DataFrame({
+        "value": ticks,
+        "start": np.full(len(ticks), start),
+        "end": tickend,
+    })
+
+
+class GeomLogticks(Geom):
+    """Log-scale tick marks geom.
+
+    Mirrors R's ``GeomLogticks`` from ``annotation-logticks.R``.
+    Draws diminishing tick marks at log-spaced intervals on specified
+    sides of the plot panel.
+    """
+
+    default_aes: Mapping = Mapping(
+        colour="black",
+        linewidth=0.5,
+        linetype=1,
+        alpha=1.0,
+    )
+
+    def draw_panel(
+        self,
+        data: pd.DataFrame = None,
+        panel_params: Any = None,
+        coord: Any = None,
+        base: float = 10,
+        sides: str = "bl",
+        outside: bool = False,
+        scaled: bool = True,
+        short: float = 0.1,
+        mid: float = 0.2,
+        long: float = 0.3,
+        **params: Any,
+    ) -> Any:
+        """Draw log tick marks on panel edges.
+
+        Mirrors R's ``GeomLogticks$draw_panel``.
+        """
+        if panel_params is None:
+            return null_grob()
+
+        x_range = panel_params.get("x_range") or panel_params.get("x.range")
+        y_range = panel_params.get("y_range") or panel_params.get("y.range")
+
+        # Extract gp from data row
+        colour = "black"
+        linewidth_val = 0.5
+        linetype_val = 1
+        alpha_val = 1.0
+        if data is not None and len(data) > 0:
+            row = data.iloc[0]
+            colour = row.get("colour", "black")
+            linewidth_val = float(row.get("linewidth", 0.5))
+            linetype_val = row.get("linetype", 1)
+            alpha_val = float(row.get("alpha", 1.0) or 1.0)
+
+        gp = Gpar(col=colour, lwd=linewidth_val, lty=linetype_val, alpha=alpha_val)
+
+        ticks_grobs = []
+
+        # X-axis ticks (bottom / top)
+        if ("b" in sides or "t" in sides) and x_range is not None:
+            xr = [float(x_range[0]), float(x_range[1])]
+            if all(np.isfinite(xr)):
+                xticks = _calc_logticks(
+                    base=base,
+                    minpow=int(np.floor(xr[0])),
+                    maxpow=int(np.ceil(xr[1])),
+                    start=0.0, shortend=short, midend=mid, longend=long,
+                )
+                if scaled:
+                    xticks["value"] = np.log(xticks["value"]) / np.log(base)
+
+                # Rescale to [0, 1] NPC
+                span = xr[1] - xr[0]
+                if span > 0:
+                    xticks["x"] = (xticks["value"] - xr[0]) / span
+                    xticks = xticks[(xticks["x"] >= 0) & (xticks["x"] <= 1)]
+
+                    if outside:
+                        xticks["end"] = -xticks["end"]
+
+                    if "b" in sides and len(xticks) > 0:
+                        ticks_grobs.append(segments_grob(
+                            x0=xticks["x"].values, y0=np.zeros(len(xticks)),
+                            x1=xticks["x"].values, y1=xticks["end"].values * 0.02,
+                            gp=gp, name="logtick_x_b",
+                        ))
+
+                    if "t" in sides and len(xticks) > 0:
+                        ticks_grobs.append(segments_grob(
+                            x0=xticks["x"].values, y0=np.ones(len(xticks)),
+                            x1=xticks["x"].values, y1=1.0 - xticks["end"].values * 0.02,
+                            gp=gp, name="logtick_x_t",
+                        ))
+
+        # Y-axis ticks (left / right)
+        if ("l" in sides or "r" in sides) and y_range is not None:
+            yr = [float(y_range[0]), float(y_range[1])]
+            if all(np.isfinite(yr)):
+                yticks = _calc_logticks(
+                    base=base,
+                    minpow=int(np.floor(yr[0])),
+                    maxpow=int(np.ceil(yr[1])),
+                    start=0.0, shortend=short, midend=mid, longend=long,
+                )
+                if scaled:
+                    yticks["value"] = np.log(yticks["value"]) / np.log(base)
+
+                span = yr[1] - yr[0]
+                if span > 0:
+                    yticks["y"] = (yticks["value"] - yr[0]) / span
+                    yticks = yticks[(yticks["y"] >= 0) & (yticks["y"] <= 1)]
+
+                    if outside:
+                        yticks["end"] = -yticks["end"]
+
+                    if "l" in sides and len(yticks) > 0:
+                        ticks_grobs.append(segments_grob(
+                            x0=np.zeros(len(yticks)),
+                            y0=yticks["y"].values,
+                            x1=yticks["end"].values * 0.02,
+                            y1=yticks["y"].values,
+                            gp=gp, name="logtick_y_l",
+                        ))
+
+                    if "r" in sides and len(yticks) > 0:
+                        ticks_grobs.append(segments_grob(
+                            x0=np.ones(len(yticks)),
+                            y0=yticks["y"].values,
+                            x1=1.0 - yticks["end"].values * 0.02,
+                            y1=yticks["y"].values,
+                            gp=gp, name="logtick_y_r",
+                        ))
+
+        if not ticks_grobs:
+            return null_grob()
+
+        return grob_tree(*ticks_grobs, name="logticks")
 
 
 # ===========================================================================

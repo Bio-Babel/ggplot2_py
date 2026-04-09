@@ -1,0 +1,15 @@
+# GitHub language statistics: only count Python
+*.py linguist-detectable
+*.ipynb linguist-documentation
+*.html linguist-documentation
+*.css linguist-documentation
+*.js linguist-documentation
+*.json linguist-documentation
+*.yml linguist-documentation
+*.yaml linguist-documentation
+*.md linguist-documentation
+*.R linguist-documentation
+*.csv linguist-documentation
+site/** linguist-documentation
+docs/** linguist-documentation
+tutorials/** linguist-documentation

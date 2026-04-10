@@ -22,11 +22,16 @@ Additional Python dependencies: numpy, pandas, matplotlib, scipy, pycairo.
 
 ```bash
 # Install companion packages first
-pip install -e /path/to/grid_py
-pip install -e /path/to/gtable_py
-pip install -e /path/to/scales_py
+pip install git+https://github.com/R2pyBioinformatics/grid_py.git
+pip install git+https://github.com/R2pyBioinformatics/gtable_py.git
+pip install git+https://github.com/R2pyBioinformatics/scales_py.git
 
 # Install ggplot2_py
+pip install git+https://github.com/R2pyBioinformatics/ggplot2_py.git
+
+# Or for development (editable install)
+git clone https://github.com/R2pyBioinformatics/ggplot2_py.git
+cd ggplot2_py
 pip install -e ".[dev]"
 ```
 
@@ -48,6 +53,9 @@ from ggplot2_py.datasets import mpg
 
 - [Getting Started](tutorials/ggplot2.ipynb) — core concepts: data, aes, geoms, stats, scales, facets, coords, themes
 - [Geom Gallery](tutorials/geoms_gallery.ipynb) — boxplot, violin, density, tile, hex and combinations
+- [Labels & Facets](tutorials/labels_and_facets.ipynb) — axis titles, plot title/subtitle/caption, facet strip labels
+- [Aesthetic Specs](tutorials/aesthetic_specs.ipynb) — colour, fill, alpha, linetype, shape, size, colour scales
+- [Extending ggplot2](tutorials/extending_ggplot2.ipynb) — custom stats, geoms, themes via ggproto
 
 ## Documentation
 

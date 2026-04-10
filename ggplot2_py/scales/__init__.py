@@ -288,7 +288,7 @@ def _mid_rescaler(
         if _from is None:
             x_arr = np.asarray(x, dtype=float)
             _from = np.array([np.nanmin(x_arr), np.nanmax(x_arr)])
-        return rescale_mid(x, to=np.array([0.0, 1.0]), _from=_from, mid=trans_mid)
+        return rescale_mid(x, to=np.array([0.0, 1.0]), from_range=_from, mid=trans_mid)
 
     return _rescaler
 

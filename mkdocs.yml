@@ -14,6 +14,7 @@ nav:
   - Tutorials:
     - Getting Started: tutorials/ggplot2.ipynb
     - Geom Gallery: tutorials/geoms_gallery.ipynb
+    - Labels & Facets: tutorials/labels_and_facets.ipynb
 
 plugins:
   - search

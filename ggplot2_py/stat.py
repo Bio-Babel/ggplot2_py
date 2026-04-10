@@ -4243,23 +4243,42 @@ class StatContourFilled(Stat):
             rows = []
             group_base = data["group"].iloc[0] if "group" in data.columns else 1
             piece = 0
-            for i, collection in enumerate(cs.collections):
-                level_low = brks[i] if i < len(brks) else brks[-1]
-                level_high = brks[i + 1] if i + 1 < len(brks) else brks[-1]
-                for path in collection.get_paths():
-                    piece += 1
-                    vertices = path.vertices
-                    for pt in vertices:
-                        rows.append({
-                            "x": pt[0],
-                            "y": pt[1],
-                            "level": f"({level_low}, {level_high}]",
-                            "level_low": level_low,
-                            "level_high": level_high,
-                            "level_mid": (level_low + level_high) / 2,
-                            "piece": piece,
-                            "group": f"{group_base}-{piece:03d}",
-                        })
+            # Use allsegs (modern matplotlib 3.8+) or collections (legacy)
+            if hasattr(cs, "allsegs"):
+                for i in range(len(cs.allsegs)):
+                    level_low = brks[i] if i < len(brks) else brks[-1]
+                    level_high = brks[i + 1] if i + 1 < len(brks) else brks[-1]
+                    for seg in cs.allsegs[i]:
+                        piece += 1
+                        for pt in seg:
+                            rows.append({
+                                "x": pt[0],
+                                "y": pt[1],
+                                "level": f"({level_low}, {level_high}]",
+                                "level_low": level_low,
+                                "level_high": level_high,
+                                "level_mid": (level_low + level_high) / 2,
+                                "piece": piece,
+                                "group": f"{group_base}-{piece:03d}",
+                            })
+            elif hasattr(cs, "collections"):
+                for i, collection in enumerate(cs.collections):
+                    level_low = brks[i] if i < len(brks) else brks[-1]
+                    level_high = brks[i + 1] if i + 1 < len(brks) else brks[-1]
+                    for path in collection.get_paths():
+                        piece += 1
+                        vertices = path.vertices
+                        for pt in vertices:
+                            rows.append({
+                                "x": pt[0],
+                                "y": pt[1],
+                                "level": f"({level_low}, {level_high}]",
+                                "level_low": level_low,
+                                "level_high": level_high,
+                                "level_mid": (level_low + level_high) / 2,
+                                "piece": piece,
+                                "group": f"{group_base}-{piece:03d}",
+                            })
             plt.close(fig)
         except Exception:
             return pd.DataFrame()

@@ -15,6 +15,11 @@ import numpy as np
 import pandas as pd
 
 from ggplot2_py._compat import Waiver, is_waiver, waiver, cli_abort, cli_warn
+
+
+def _is_waiver_like(x: Any) -> bool:
+    """Check if x is a Waiver or waiver-like sentinel."""
+    return is_waiver(x) or x is None
 from ggplot2_py.ggproto import GGProto, ggproto
 from ggplot2_py._utils import snake_class, modify_list, compact
 
@@ -1011,7 +1016,7 @@ class CoordCartesian(Coord):
         x_major_pos, x_labels = _compute_break_labels(scale_x, x_range)
         y_major_pos, y_labels = _compute_break_labels(scale_y, y_range)
 
-        return {
+        result = {
             "x_range": x_range,
             "y_range": y_range,
             "x.range": x_range,
@@ -1025,6 +1030,40 @@ class CoordCartesian(Coord):
             "reverse": getattr(self, "reverse", "none"),
         }
 
+        # Secondary axes — compute breaks via the AxisSecondary transform
+        for axis, scale, rng in [("x", scale_x, x_range), ("y", scale_y, y_range)]:
+            sec = getattr(scale, "secondary_axis", None)
+            if sec is None or _is_waiver_like(sec):
+                continue
+            trans_fn = getattr(sec, "trans", None)
+            if trans_fn is None:
+                continue
+            try:
+                primary_breaks = np.array([float(b) for b in result[f"{axis}_major"]])
+                # Transform break NPC positions back to data, apply sec trans,
+                # then rescale back to NPC.  For dup_axis (identity), this
+                # produces the same positions with (optionally) different labels.
+                data_breaks = primary_breaks * (rng[1] - rng[0]) + rng[0]
+                sec_data = np.array([float(trans_fn(b)) for b in data_breaks])
+                sec_rng = [float(trans_fn(rng[0])), float(trans_fn(rng[1]))]
+                if sec_rng[1] != sec_rng[0]:
+                    sec_npc = (sec_data - sec_rng[0]) / (sec_rng[1] - sec_rng[0])
+                else:
+                    sec_npc = primary_breaks
+                sec_labels = getattr(sec, "labels", None)
+                if (sec_labels is None or _is_waiver_like(sec_labels)
+                        or not hasattr(sec_labels, "__len__")):
+                    # derive() / waiver / None → generate from break values
+                    sec_labels = [str(round(v, 2)) for v in sec_data]
+                elif callable(sec_labels):
+                    sec_labels = sec_labels(sec_data)
+                result[f"{axis}_sec_major"] = sec_npc
+                result[f"{axis}_sec_labels"] = sec_labels
+            except Exception:
+                pass
+
+        return result
+
     def render_bg(self, panel_params: Dict[str, Any], theme: Any) -> Any:
         """Render panel background (grid lines, background fill).
 
@@ -1034,18 +1073,55 @@ class CoordCartesian(Coord):
         return guide_grid(theme, panel_params, self)
 
     def render_axis_h(self, panel_params: Dict[str, Any], theme: Any) -> Dict[str, Any]:
-        bottom = _render_axis(
-            panel_params, "x", "bottom", theme,
-        )
         from grid_py import null_grob
-        return {"top": null_grob(), "bottom": bottom}
+        bottom = _render_axis(panel_params, "x", "bottom", theme)
+        # Secondary axis (top) — rendered if panel_params has sec breaks
+        top = null_grob()
+        if panel_params.get("x_sec_major") is not None:
+            top = _render_axis(
+                {**panel_params,
+                 "x_major": panel_params["x_sec_major"],
+                 "x_labels": panel_params.get("x_sec_labels", [])},
+                "x", "top", theme,
+            )
+        return {"top": top, "bottom": bottom}
 
     def render_axis_v(self, panel_params: Dict[str, Any], theme: Any) -> Dict[str, Any]:
-        left = _render_axis(
-            panel_params, "y", "left", theme,
-        )
         from grid_py import null_grob
-        return {"left": left, "right": null_grob()}
+        left = _render_axis(panel_params, "y", "left", theme)
+        # Secondary axis (right)
+        right = null_grob()
+        if panel_params.get("y_sec_major") is not None:
+            right = _render_axis(
+                {**panel_params,
+                 "y_major": panel_params["y_sec_major"],
+                 "y_labels": panel_params.get("y_sec_labels", [])},
+                "y", "right", theme,
+            )
+        return {"left": left, "right": right}
+
+
+def _resolve_element(element_name: str, theme: Any, fallback: dict) -> dict:
+    """Resolve a theme element via calc_element, returning a flat dict.
+
+    Falls back to *fallback* if the element is blank or missing.
+    """
+    from ggplot2_py.theme_elements import calc_element, ElementBlank
+    try:
+        el = calc_element(element_name, theme)
+    except Exception:
+        return dict(fallback)
+    if el is None or isinstance(el, ElementBlank):
+        return dict(fallback)
+    out = dict(fallback)
+    for key in fallback:
+        val = getattr(el, key, None)
+        if val is not None:
+            # Resolve Rel values to float
+            if hasattr(val, "x"):  # Rel wrapper
+                val = float(val.x) * fallback.get(key, 1)
+            out[key] = val
+    return out
 
 
 def _render_axis(
@@ -1056,25 +1132,9 @@ def _render_axis(
 ) -> Any:
     """Build an axis grob with tick marks and labels.
 
-    Mirrors R's ``render_axis`` / ``guide_axis_base``.  Produces a
-    ``GTree`` with tick marks (short line segments) and tick labels (text).
-
-    Parameters
-    ----------
-    panel_params : dict
-        Must contain ``{aesthetic}_major`` (NPC positions) and
-        ``{aesthetic}_labels`` (text labels).
-    aesthetic : str
-        ``"x"`` or ``"y"``.
-    position : str
-        ``"bottom"``, ``"top"``, ``"left"``, or ``"right"``.
-    theme : Theme
-        The plot theme (currently used for colour defaults).
-
-    Returns
-    -------
-    grob
-        A GTree containing tick marks and labels.
+    Mirrors R's ``render_axis`` / ``guide_axis_base``.  All visual
+    properties are resolved from the theme via ``calc_element()``,
+    matching R's inheritance chain (e.g. axis.text.x → axis.text → text).
     """
     from grid_py import (
         GTree, GList, null_grob, Gpar,
@@ -1087,28 +1147,39 @@ def _render_axis(
     if len(breaks) == 0:
         return null_grob()
 
-    # Ensure labels match breaks length
     if len(labels) != len(breaks):
         labels = [str(round(b, 2)) for b in breaks]
 
-    children = []
+    # --- Resolve theme elements ---
+    # R defaults: axis.line colour=black lwd~0.5, axis.text size=rel(0.8)*11=8.8
+    line_el = _resolve_element(
+        f"axis.line.{aesthetic}", theme,
+        {"colour": "grey20", "linewidth": 0.5, "linetype": 1},
+    )
+    tick_el = _resolve_element(
+        f"axis.ticks.{aesthetic}", theme,
+        {"colour": "grey20", "linewidth": 0.5},
+    )
+    text_el = _resolve_element(
+        f"axis.text.{aesthetic}", theme,
+        {"colour": "grey30", "size": 8, "angle": 0,
+         "hjust": None, "vjust": None},
+    )
 
-    # R's axis layout (GuideAxis$assemble_drawing):
-    #   panel-edge → axis-line → tick-marks → gap → tick-labels
-    # Positions are in [0, 1] NPC within the axis viewport cell.
-    # R uses unit(0.15, "cm") for ticks; we use viewport fractions.
-    TICK = 0.12     # tick mark length as fraction of axis cell
-    GAP = 0.08      # gap between tick end and label anchor
+    TICK = 0.12
+    GAP = 0.08
+
+    children = []
 
     if aesthetic == "x":
         is_bottom = position == "bottom"
         edge = 1.0 if is_bottom else 0.0
         sign = -1.0 if is_bottom else 1.0
 
-        # Axis line at panel boundary
+        # Axis line
         children.append(segments_grob(
             x0=[0.0], y0=[edge], x1=[1.0], y1=[edge],
-            gp=Gpar(col="grey20", lwd=0.5),
+            gp=Gpar(col=line_el["colour"], lwd=line_el["linewidth"]),
             name="axis.line.x",
         ))
 
@@ -1119,41 +1190,26 @@ def _render_axis(
                 y0=np.full(len(breaks), edge),
                 x1=breaks.copy(),
                 y1=np.full(len(breaks), edge + sign * TICK),
-                gp=Gpar(col="grey20", lwd=0.5),
+                gp=Gpar(col=tick_el["colour"], lwd=tick_el["linewidth"]),
                 name="axis.ticks.x",
             ))
 
-        # Tick labels.
-        # Read rotation/hjust from theme(axis.text.x) if set,
-        # matching R's element_text(angle=, hjust=) semantics.
-        # If not set, auto-detect overlap and rotate.
-        axis_text_elem = None
-        if theme is not None and hasattr(theme, "get"):
-            axis_text_elem = theme.get("axis.text.x", None)
+        # Tick labels — resolve rotation
+        fontsize = float(text_el["size"])
+        col = text_el["colour"]
+        user_angle = text_el["angle"]
 
-        user_angle = getattr(axis_text_elem, "angle", None)
-        user_hjust = getattr(axis_text_elem, "hjust", None)
-        user_vjust = getattr(axis_text_elem, "vjust", None)
-        user_size = getattr(axis_text_elem, "size", None)
-        user_colour = getattr(axis_text_elem, "colour", None)
-
-        fontsize = user_size if user_size is not None else 7
-        col = user_colour if user_colour is not None else "grey30"
-
-        if user_angle is not None:
-            # User explicitly set rotation via theme
+        if user_angle is not None and float(user_angle) != 0:
             rot = float(user_angle)
-            hj = float(user_hjust) if user_hjust is not None else (1.0 if rot != 0 else 0.5)
-            vj = float(user_vjust) if user_vjust is not None else (1.0 if is_bottom else 0.0)
+            hj = float(text_el["hjust"]) if text_el["hjust"] is not None else (1.0 if rot != 0 else 0.5)
+            vj = float(text_el["vjust"]) if text_el["vjust"] is not None else (1.0 if is_bottom else 0.0)
             label_just = (hj, vj)
         else:
-            # Auto-detect overlap: estimate max label width in NPC
             max_chars = max((len(str(l)) for l in labels), default=3)
             n = len(breaks)
             spacing = (breaks[-1] - breaks[0]) / max(n - 1, 1) if n > 1 else 1.0
             est_max_width = max_chars * 0.016
             needs_rotate = n > 1 and est_max_width > spacing * 0.9
-
             rot = 30.0 if needs_rotate else 0.0
             if needs_rotate:
                 label_just = ("right", "top") if is_bottom else ("right", "bottom")
@@ -1169,15 +1225,15 @@ def _render_axis(
                 name=f"axis.text.x.{i}",
             ))
 
-    else:
+    else:  # y axis
         is_left = position == "left"
         edge = 1.0 if is_left else 0.0
         sign = -1.0 if is_left else 1.0
 
-        # Axis line at panel boundary
+        # Axis line
         children.append(segments_grob(
             x0=[edge], y0=[0.0], x1=[edge], y1=[1.0],
-            gp=Gpar(col="grey20", lwd=0.5),
+            gp=Gpar(col=line_el["colour"], lwd=line_el["linewidth"]),
             name="axis.line.y",
         ))
 
@@ -1188,17 +1244,19 @@ def _render_axis(
                 y0=breaks.copy(),
                 x1=np.full(len(breaks), edge + sign * TICK),
                 y1=breaks.copy(),
-                gp=Gpar(col="grey20", lwd=0.5),
+                gp=Gpar(col=tick_el["colour"], lwd=tick_el["linewidth"]),
                 name="axis.ticks.y",
             ))
 
         # Tick labels
+        fontsize = float(text_el["size"])
+        col = text_el["colour"]
         label_x = edge + sign * (TICK + GAP)
         for i, (bk, lbl) in enumerate(zip(breaks, labels)):
             children.append(text_grob(
                 label=str(lbl), x=label_x, y=float(bk),
                 just="right" if is_left else "left",
-                gp=Gpar(fontsize=7, col="grey30"),
+                gp=Gpar(fontsize=fontsize, col=col),
                 name=f"axis.text.y.{i}",
             ))
 

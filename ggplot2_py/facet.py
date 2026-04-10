@@ -413,14 +413,19 @@ class Facet(GGProto):
         theme: Any,
         params: Dict[str, Any],
     ) -> Any:
-        """Assemble panels into a gtable.
+        """Assemble panels into a gtable with background, axes, and labels.
+
+        Mirrors R's ``Facet$draw_panels``:
+        1. Decorate each panel with coord background + foreground
+        2. Render axis grobs via coord
+        3. Assemble into a gtable with axis rows/columns
 
         Parameters
         ----------
         panels : list of grobs (per-layer, each containing per-panel grobs)
         layout : pd.DataFrame
         x_scales, y_scales : list
-        ranges : list
+        ranges : list of panel_params dicts
         coord : Coord
         data : list
         theme : Theme
@@ -430,16 +435,37 @@ class Facet(GGProto):
         -------
         gtable
         """
-        from grid_py import GTree, GList, null_grob
+        from grid_py import GTree, GList, null_grob, Viewport
         from gtable_py import Gtable, gtable_add_grob
         from grid_py import Unit as unit
 
         nrow = int(layout["ROW"].max()) if len(layout) > 0 else 1
         ncol = int(layout["COL"].max()) if len(layout) > 0 else 1
 
+        # Estimate axis cell sizes based on label content.
+        # In R, axis grobs calculate their own width/height using
+        # grobWidth/grobHeight.  We approximate by estimating text size.
+        #
+        # R defaults: axis.ticks.length = unit(0.15, "cm"), fontsize ~11pt
+        # At typical DPI, a character is ~0.6 of fontsize in width.
+        # We express sizes in "null" units proportional to the panel.
+        y_labels = ranges[0].get("y_labels", []) if ranges else []
+        x_labels = ranges[0].get("x_labels", []) if ranges else []
+
+        # Left axis width: based on longest y-label character count.
+        # Labels are at NPC 0.80 within the axis cell (TICK+GAP=0.20),
+        # so the cell must be wide enough for the text at that offset.
+        max_y_chars = max((len(str(l)) for l in y_labels), default=2)
+        AX_L = 0.05 + max_y_chars * 0.022  # ~2.2% per character
+
+        # Bottom axis height: fixed for horizontal labels
+        AX_B = 0.10
+
+        # R-style 3-column layout: [left-axis | panel(s) | right-spacer]
+        # and 2-row layout:        [panel(s) | bottom-axis]
         gt = Gtable(
-            widths=unit([1] * ncol, "null"),
-            heights=unit([1] * nrow, "null"),
+            widths=unit([AX_L] + [1] * ncol + [0.01], "null"),
+            heights=unit([1] * nrow + [AX_B], "null"),
             name="layout",
         )
 
@@ -448,7 +474,9 @@ class Facet(GGProto):
             r = int(row_info["ROW"])
             c = int(row_info["COL"])
             panel_idx = panel_id - 1
+            pp = ranges[panel_idx] if panel_idx < len(ranges) else {}
 
+            # --- Collect geom grobs for this panel ---
             panel_grobs = []
             for layer_grobs in panels:
                 if isinstance(layer_grobs, list) and panel_idx < len(layer_grobs):
@@ -456,12 +484,44 @@ class Facet(GGProto):
                 elif not isinstance(layer_grobs, list) and layer_grobs is not None:
                     panel_grobs.append(layer_grobs)
 
-            if panel_grobs:
-                content = GTree(
+            # --- Decorate panel with background + foreground ---
+            # coord.draw_panel wraps in a Viewport so NPC [0,1] maps
+            # to the panel cell region (R semantics).
+            if hasattr(coord, "draw_panel"):
+                decorated = coord.draw_panel(panel_grobs, pp, theme)
+            else:
+                decorated = GTree(
                     children=GList(*panel_grobs),
                     name=f"panel-{panel_id}",
                 )
-                gt = gtable_add_grob(gt, content, t=r, l=c, name=f"panel-{r}-{c}")
+
+            # Place panel in cell (r, c+1) — offset by 1 for left axis col
+            gt = gtable_add_grob(
+                gt, decorated, t=r, l=c + 1, name=f"panel-{r}-{c}",
+            )
+
+            # --- Axes: only on the edges, matching R's facet semantics ---
+            # Bottom axis: only for the last row
+            is_bottom_row = (r == nrow)
+            if is_bottom_row and hasattr(coord, "render_axis_h"):
+                axes_h = coord.render_axis_h(pp, theme)
+                bottom_ax = axes_h.get("bottom")
+                if bottom_ax is not None:
+                    gt = gtable_add_grob(
+                        gt, bottom_ax, t=nrow + 1, l=c + 1,
+                        name=f"axis-b-{r}-{c}",
+                    )
+
+            # Left axis: only for the first column
+            is_left_col = (c == 1)
+            if is_left_col and hasattr(coord, "render_axis_v"):
+                axes_v = coord.render_axis_v(pp, theme)
+                left_ax = axes_v.get("left")
+                if left_ax is not None:
+                    gt = gtable_add_grob(
+                        gt, left_ax, t=r, l=1,
+                        name=f"axis-l-{r}-{c}",
+                    )
 
         return gt
 
@@ -478,7 +538,7 @@ class Facet(GGProto):
         labels: Dict[str, Any],
         params: Dict[str, Any],
     ) -> Any:
-        """Add axis/facet labels to the panel table.
+        """Add axis title labels to the panel table.
 
         Parameters
         ----------
@@ -490,6 +550,8 @@ class Facet(GGProto):
         -------
         gtable
         """
+        # labels is a dict like {"x": {"primary": "cty"}, "y": {"primary": "hwy"}}
+        # For now, axis titles are included as part of axis rendering
         return panels
 
     def vars(self) -> List[str]:
@@ -549,37 +611,15 @@ class FacetNull(Facet):
         theme: Any,
         params: Dict[str, Any],
     ) -> Any:
-        """Build a single-panel gtable from all layer grobs."""
-        from grid_py import GTree, GList, null_grob
-        from gtable_py import Gtable, gtable_add_grob
-        from grid_py import Unit as unit
+        """Build a single-panel gtable with background, axes, and geom content.
 
-        # Collect all grobs for panel 1 (index 0 from each layer)
-        panel_grobs = []
-        for layer_grobs in panels:
-            if isinstance(layer_grobs, list):
-                if len(layer_grobs) > 0:
-                    panel_grobs.append(layer_grobs[0])
-            elif layer_grobs is not None:
-                panel_grobs.append(layer_grobs)
-
-        if not panel_grobs:
-            return null_grob()
-
-        # Wrap all panel grobs in a single GTree
-        panel_content = GTree(
-            children=GList(*panel_grobs),
-            name="panel-1",
+        Delegates to the base ``Facet.draw_panels`` which handles coord
+        decoration and axis rendering.
+        """
+        return super().draw_panels(
+            panels, layout, x_scales, y_scales, ranges,
+            coord, data, theme, params,
         )
-
-        # Create a 1x1 Gtable holding the panel
-        gt = Gtable(
-            widths=unit([1], "null"),
-            heights=unit([1], "null"),
-            name="layout",
-        )
-        gt = gtable_add_grob(gt, panel_content, t=1, l=1, name="panel-1-1")
-        return gt
 
 
 # ---------------------------------------------------------------------------

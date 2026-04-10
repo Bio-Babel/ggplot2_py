@@ -871,7 +871,8 @@ class ScaleContinuous(Scale):
             Length-2 expanded range.
         """
         if expand is None:
-            expand = expansion(0, 0)
+            # R default for continuous scales: expansion(mult = 0.05)
+            expand = expansion(0.05, 0)
         if limits is None:
             limits = self.get_limits()
         return expand_range4(limits, expand)
@@ -1172,7 +1173,8 @@ class ScaleDiscrete(Scale):
         limits: Optional[Any] = None,
     ) -> np.ndarray:
         if expand is None:
-            expand = expansion(0, 0)
+            # R default for discrete position scales: expansion(add = 0.6)
+            expand = expansion(0, 0.6)
         if limits is None:
             limits = self.get_limits()
         n = len(limits) if limits is not None else 0
@@ -1589,7 +1591,8 @@ class ScaleDiscretePosition(ScaleDiscrete):
         limits: Optional[Any] = None,
     ) -> np.ndarray:
         if expand is None:
-            expand = expansion(0, 0)
+            # R default for discrete position scales: expansion(add = 0.6)
+            expand = expansion(0, 0.6)
         if limits is None:
             limits = self.get_limits()
         mapped = self.map(limits)

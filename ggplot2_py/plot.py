@@ -544,6 +544,10 @@ def ggplot_build(plot: Any) -> BuiltGGPlot:
             data[i] = layer.compute_position(data[i], layout)
 
     # --- Reset and retrain position scales ---
+    # Re-fetch scales: stat computations and add_missing may have created
+    # new position scales (e.g. y scale for geom_bar via stat_count).
+    scale_x = scales.get_scales("x")
+    scale_y = scales.get_scales("y")
     layout.reset_scales()
     layout.train_position(data, scale_x, scale_y)
     layout.setup_panel_params()

@@ -309,7 +309,7 @@ class Position(GGProto):
             return data
 
         panels = []
-        for panel_id, panel_data in data.groupby("PANEL", sort=False):
+        for panel_id, panel_data in data.groupby("PANEL", sort=False, observed=True):
             if len(panel_data) == 0:
                 continue
             scales = None
@@ -965,6 +965,11 @@ def _pos_stack(
 ) -> pd.DataFrame:
     """Core stacking algorithm.
 
+    Stacks overlapping bars *within* each x-position group.  In R's
+    ggplot2 this corresponds to ``collide()`` + ``stack_var()``, which
+    groups rows sharing the same ``xmin``/``xmax`` interval before
+    cumulating y values.
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -983,23 +988,37 @@ def _pos_stack(
         else:
             df = df.sort_values("group", ascending=False)
 
+    # Determine the x-grouping key.  Use xmin if available (matches R's
+    # collide), otherwise fall back to x.
+    if "xmin" in df.columns:
+        x_key = df["xmin"].values
+    elif "x" in df.columns:
+        x_key = df["x"].values
+    else:
+        x_key = np.zeros(len(df))
+
     y = df["y"].values if "y" in df.columns else np.zeros(len(df))
     y = np.where(np.isnan(y), 0, y)
 
-    heights = np.concatenate([[0], np.cumsum(y)])
+    ymin_out = np.zeros(len(df))
+    ymax_out = np.zeros(len(df))
 
-    if fill:
-        total = abs(heights[-1])
-        if total > np.sqrt(np.finfo(float).eps):
-            heights = heights / total
+    # Stack within each unique x position
+    for xval in np.unique(x_key):
+        mask = x_key == xval
+        y_group = y[mask]
+        heights = np.concatenate([[0], np.cumsum(y_group)])
+        if fill:
+            total = abs(heights[-1])
+            if total > np.sqrt(np.finfo(float).eps):
+                heights = heights / total
+        n = len(y_group)
+        ymin_out[mask] = np.minimum(heights[:n], heights[1:])
+        ymax_out[mask] = np.maximum(heights[:n], heights[1:])
 
-    n = len(df)
-    ymin = np.minimum(heights[:n], heights[1:])
-    ymax = np.maximum(heights[:n], heights[1:])
-
-    df["y"] = (1 - vjust) * ymin + vjust * ymax
-    df["ymin"] = ymin
-    df["ymax"] = ymax
+    df["y"] = (1 - vjust) * ymin_out + vjust * ymax_out
+    df["ymin"] = ymin_out
+    df["ymax"] = ymax_out
     return df
 
 

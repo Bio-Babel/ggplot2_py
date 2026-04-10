@@ -458,7 +458,7 @@ class Geom(GGProto):
 
         # Split by PANEL
         if "PANEL" in data.columns:
-            panels = {k: v for k, v in data.groupby("PANEL")}
+            panels = {k: v for k, v in data.groupby("PANEL", observed=True)}
         else:
             panels = {1: data}
 

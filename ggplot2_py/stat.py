@@ -1504,7 +1504,7 @@ class Stat(GGProto):
 
         results = []
         if "PANEL" in data.columns:
-            for panel, panel_data in data.groupby("PANEL", sort=False):
+            for panel, panel_data in data.groupby("PANEL", sort=False, observed=True):
                 scales = layout.get_scales(panel) if layout is not None else {}
                 try:
                     result = self.compute_panel(panel_data, scales, **trimmed)
@@ -1512,6 +1512,10 @@ class Stat(GGProto):
                     cli_warn(f"Computation failed in {snake_class(self)}: {e}")
                     result = pd.DataFrame()
                 if not result.empty:
+                    # Ensure PANEL is preserved (some stats override
+                    # compute_panel without carrying it forward).
+                    if "PANEL" not in result.columns:
+                        result["PANEL"] = panel
                     results.append(result)
         else:
             scales = {}

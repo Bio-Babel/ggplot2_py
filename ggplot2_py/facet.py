@@ -620,6 +620,14 @@ class Facet(GGProto):
         row_vars = _resolve_facet_vars(params.get("rows"))
         wrap_vars = _resolve_facet_vars(params.get("facets"))
 
+        # Resolve labeller function
+        from ggplot2_py.labeller import as_labeller, label_value
+        labeller_spec = params.get("labeller", "label_value")
+        try:
+            labeller_fn = as_labeller(labeller_spec)
+        except (ValueError, TypeError):
+            labeller_fn = label_value
+
         # Resolve strip theme elements
         strip_txt_x = _resolve_element("strip.text.x", theme,
             {"colour": "grey10", "size": 8, "angle": 0})
@@ -643,6 +651,12 @@ class Facet(GGProto):
                 name=f"strip-{name}",
             )
 
+        def _get_strip_text(vars_list, row_info):
+            """Get formatted strip label text using the labeller."""
+            lab_dict = {v: [str(row_info.get(v, ""))] for v in vars_list}
+            result = labeller_fn(lab_dict)
+            return result[0] if result else ""
+
         # --- facet_wrap ---
         if wrap_vars and not col_vars and not row_vars:
             for r in range(nrow, 0, -1):
@@ -650,7 +664,7 @@ class Facet(GGProto):
                 panels_in_row = layout[layout["ROW"] == r]
                 for _, row_info in panels_in_row.iterrows():
                     c = int(row_info["COL"])
-                    label_text = " : ".join(str(row_info.get(v, "")) for v in wrap_vars)
+                    label_text = _get_strip_text(wrap_vars, row_info)
                     strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"w-{r}-{c}")
                     gt = gtable_add_grob(gt, strip, t=r, l=c + 1,
                                          clip="off", name=f"strip-w-{r}-{c}")
@@ -661,7 +675,7 @@ class Facet(GGProto):
             gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=0)
             for c in range(1, ncol + 1):
                 panel_row = layout[layout["COL"] == c].iloc[0]
-                label_text = " : ".join(str(panel_row.get(v, "")) for v in col_vars)
+                label_text = _get_strip_text(col_vars, panel_row)
                 strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"t-{c}")
                 gt = gtable_add_grob(gt, strip, t=1, l=c + 1,
                                      clip="off", name=f"strip-t-{c}")
@@ -673,7 +687,7 @@ class Facet(GGProto):
             row_offset = 1 if col_vars else 0
             for r in range(1, nrow + 1):
                 panel_row = layout[layout["ROW"] == r].iloc[0]
-                label_text = " : ".join(str(panel_row.get(v, "")) for v in row_vars)
+                label_text = _get_strip_text(row_vars, panel_row)
                 rot = float(strip_txt_y["angle"])
                 strip = _make_strip(label_text, strip_bg_y, strip_txt_y, rot, f"r-{r}")
                 gt = gtable_add_grob(gt, strip, t=r + row_offset, l=ncol_now,

@@ -726,11 +726,13 @@ def _table_add_legends(
 ) -> Any:
     """Build legends from trained non-position scales and add to the gtable.
 
-    Mirrors R's ``table_add_legends`` in ``plot-render.R``.  Scales that
-    share the same title and breaks are **merged** into a single legend
-    (matching R's guide-merge semantics).  Legend keys are drawn using the
-    geom's ``draw_key`` function so that shape, colour, size, etc. are all
-    rendered faithfully.
+    Each legend is built as an independent :class:`~gtable_py.Gtable` with
+    its own viewport-based cell layout, faithfully mirroring R's
+    ``GuideLegend`` pipeline.  Scales sharing the same title and breaks
+    are merged into a single legend (R's guide-merge semantics).
+
+    Mirrors R's ``table_add_legends`` in ``plot-render.R`` and the
+    ``GuideLegend`` class in ``guide-legend.R``.
 
     Parameters
     ----------
@@ -749,11 +751,18 @@ def _table_add_legends(
     if not hasattr(table, "_widths"):
         return table
 
-    from gtable_py import gtable_add_grob, gtable_add_cols
-    from grid_py import (
-        Unit as unit, text_grob, rect_grob, points_grob, Gpar,
+    import math
+    from gtable_py import gtable_add_grob, gtable_add_cols, gtable_width, gtable_height
+    from grid_py import Unit as unit, text_grob, Gpar
+
+    from ggplot2_py.guide_legend import (
+        build_legend_decor,
+        build_legend_labels,
+        measure_legend_grobs,
+        arrange_legend_layout,
+        assemble_legend,
+        package_legend_box,
     )
-    from grid_py._grob import grob_tree, GList, GTree
 
     # ------------------------------------------------------------------
     # 1. Collect raw legend entries from non-position scales
@@ -774,7 +783,6 @@ def _table_add_legends(
         if breaks is None or (hasattr(breaks, "__len__") and len(breaks) == 0):
             continue
 
-        # Map breaks to aesthetic values (colours, shape ints, sizes, …)
         mapped = breaks
         if hasattr(sc, "map"):
             try:
@@ -782,7 +790,6 @@ def _table_add_legends(
             except (TypeError, ValueError):
                 pass
 
-        # Labels
         if hasattr(sc, "get_labels"):
             try:
                 labs = sc.get_labels(breaks)
@@ -826,11 +833,10 @@ def _table_add_legends(
     # 2. Merge entries that share the same title + number of breaks
     #    (R merges guides whose hash — based on title and breaks — match)
     # ------------------------------------------------------------------
-    merged: Dict[str, Dict[str, Any]] = {}  # keyed by title
+    merged: Dict[str, Dict[str, Any]] = {}
     for entry in raw_entries:
         key = entry["title"]
         if key in merged and len(merged[key]["breaks"]) == len(entry["breaks"]):
-            # Merge: add this aesthetic's mapped values
             merged[key]["aes_mapped"][entry["aesthetic"]] = entry["mapped"]
         else:
             merged[key] = {
@@ -842,19 +848,7 @@ def _table_add_legends(
     entries = list(merged.values())
 
     # ------------------------------------------------------------------
-    # 3. Determine draw_key function from layers
-    # ------------------------------------------------------------------
-    from ggplot2_py.draw_key import draw_key_point as _draw_key_point
-    draw_key_fn = _draw_key_point  # default fallback
-    if layers:
-        for layer in layers:
-            geom = getattr(layer, "geom", None)
-            if geom is not None and hasattr(geom, "draw_key"):
-                draw_key_fn = geom.draw_key
-                break  # use first layer's geom draw_key
-
-    # ------------------------------------------------------------------
-    # 4. Compute legend layout dimensions
+    # 3. Resolve theme elements
     # ------------------------------------------------------------------
     from ggplot2_py.coord import _resolve_element
 
@@ -866,186 +860,114 @@ def _table_add_legends(
     title_size = float(ltitle_el["size"])
     label_size = float(ltext_el["size"])
 
-    KEY_W_CM = 0.4
-    GAP_CM = 0.15
-    CHAR_W_CM = 0.18
-    TITLE_PAD_CM = 0.15
-    max_label_chars = 0
-    total_entries = 0
-    for entry in entries:
-        for lbl in entry["labels"]:
-            max_label_chars = max(max_label_chars, len(str(lbl)))
-        max_label_chars = max(max_label_chars, len(entry["title"]))
-        total_entries += min(len(entry["breaks"]), 20) + 1
-
-    legend_w_cm = TITLE_PAD_CM + KEY_W_CM + GAP_CM + max_label_chars * CHAR_W_CM + 0.1
-    legend_w_cm = max(legend_w_cm, 1.5)
-
-    ENTRY_H_CM = 0.32
-    BLOCK_GAP_CM = 0.15
+    KEY_W_CM = 0.5
+    KEY_H_CM = 0.5
+    SPACING_X_CM = 0.15
+    SPACING_Y_CM = 0.0
+    PADDING_CM = 0.15
 
     # ------------------------------------------------------------------
-    # 5. Build legend grobs
+    # 4. Determine draw_key function from layers
     # ------------------------------------------------------------------
-    legend_children: List[Any] = []
-    fig_h_cm = getattr(table, "_fig_h_cm", 12.7)
-    try:
-        nrow_t = len(table._heights)
-        fig_h_cm = 5.0 * 2.54
-    except Exception:
-        pass
-    step_npc = ENTRY_H_CM / fig_h_cm
-    gap_npc = BLOCK_GAP_CM / fig_h_cm
-    y_npc = 1.0 - step_npc * 0.5
+    from ggplot2_py.draw_key import draw_key_point as _draw_key_point
+    draw_key_fn = _draw_key_point
+    if layers:
+        for layer in layers:
+            geom = getattr(layer, "geom", None)
+            if geom is not None and hasattr(geom, "draw_key"):
+                draw_key_fn = geom.draw_key
+                break
+
+    # ------------------------------------------------------------------
+    # 5. Build each legend as an independent Gtable
+    # ------------------------------------------------------------------
+    legend_gtables = []
 
     for entry in entries:
-        aes_mapped = entry["aes_mapped"]
-        n = len(entry["breaks"])
-        aes_names = list(aes_mapped.keys())
+        n_breaks = len(entry["breaks"])
+        if n_breaks == 0:
+            continue
 
-        # Title
-        legend_children.append(text_grob(
-            label=entry["title"], x=0.05, y=y_npc,
-            just=("left", "top"),
-            gp=Gpar(fontsize=title_size,
-                     col=ltitle_el["colour"], fontface="bold"),
-            name=f"legend.title.{entry['title']}",
-        ))
-        y_npc -= step_npc
+        # Single column layout (ncol=1), all breaks in one column
+        nrow = min(n_breaks, 20)
+        ncol = 1
 
-        # Determine which aesthetics are present in this merged entry
-        has_colour = any(
-            a in ("colour", "color") for a in aes_names
+        # Build key glyphs
+        decor = build_legend_decor(
+            entry, draw_key_fn, layers,
+            key_width_cm=KEY_W_CM, key_height_cm=KEY_H_CM,
         )
-        has_fill = "fill" in aes_names
-        has_shape = "shape" in aes_names
-        has_size = "size" in aes_names
 
-        # Decide rendering approach:
-        #   - If shape is present, use points_grob for the key
-        #   - Else if colour/fill, use rect
-        #   - Else if size, use circle
-        use_point_key = has_shape
+        # Build labels
+        label_grobs = build_legend_labels(
+            entry, label_size=label_size, label_colour=ltext_el["colour"],
+        )
 
-        for i in range(min(n, 20)):
-            ky = y_npc
-            key_h_npc = step_npc * 0.7
+        # Measure
+        sizes = measure_legend_grobs(
+            decor, label_grobs, n_breaks,
+            nrow=nrow, ncol=ncol,
+            key_width_cm=KEY_W_CM, key_height_cm=KEY_H_CM,
+            spacing_x=SPACING_X_CM, spacing_y=SPACING_Y_CM,
+            text_position="right",
+        )
 
-            # Gather per-key aesthetic values for this break index
-            colour_val = None
-            for a in ("colour", "color"):
-                if a in aes_mapped:
-                    colour_val = aes_mapped[a][i] if i < len(aes_mapped[a]) else None
-                    break
-            fill_val = None
-            if "fill" in aes_mapped:
-                fill_val = aes_mapped["fill"][i] if i < len(aes_mapped["fill"]) else None
-            shape_val = None
-            if "shape" in aes_mapped:
-                shape_val = aes_mapped["shape"][i] if i < len(aes_mapped["shape"]) else None
-            size_val = None
-            if "size" in aes_mapped:
-                size_val = aes_mapped["size"][i] if i < len(aes_mapped["size"]) else None
+        # Layout
+        layout = arrange_legend_layout(
+            n_breaks, nrow=nrow, ncol=ncol,
+            text_position="right",
+        )
 
-            if use_point_key:
-                # Build a data dict matching draw_key_point expectations
-                key_data = {
-                    "colour": _safe_colour(colour_val) if colour_val is not None else "black",
-                    "fill": _safe_colour(fill_val) if fill_val is not None else "black",
-                    "shape": int(shape_val) if shape_val is not None else 19,
-                    "size": float(size_val) if size_val is not None else 1.5,
-                    "alpha": None,
-                    "stroke": 0.5,
-                }
-                # Use points_grob directly at the legend key position.
-                # draw_key_point draws at (0.5, 0.5) in its own viewport;
-                # we place inline at the correct legend NPC position.
-                from ggplot2_py.geom import translate_shape_string
-                pch = translate_shape_string(key_data["shape"])
-                _PT = 72.27 / 25.4
-                _STROKE = 96 / 25.4
-                pt_size = (key_data["size"] * _PT) + (key_data["stroke"] * _STROKE)
-                legend_children.append(points_grob(
-                    x=0.12,
-                    y=ky - key_h_npc * 0.4,
-                    pch=pch,
-                    gp=Gpar(
-                        col=key_data["colour"],
-                        fill=key_data["fill"],
-                        fontsize=pt_size,
-                        lwd=key_data["stroke"] * _STROKE,
-                    ),
-                    name=f"legend.key.point.{entry['title']}.{i}",
-                ))
+        # Title grob
+        title_grob = text_grob(
+            label=entry["title"],
+            x=0.0, y=0.5,
+            just=("left", "centre"),
+            gp=Gpar(
+                fontsize=title_size,
+                col=ltitle_el["colour"],
+                fontface="bold",
+            ),
+            name=f"legend.title.{entry['title']}",
+        )
 
-            elif has_fill and not has_shape:
-                # Pure fill legend: coloured rectangle
-                col_str = _safe_colour(fill_val)
-                legend_children.append(rect_grob(
-                    x=0.05, y=ky, width=0.15, height=key_h_npc,
-                    just=("left", "top"),
-                    gp=Gpar(fill=col_str, col="grey60", lwd=0.5),
-                    name=f"legend.key.fill.{entry['title']}.{i}",
-                ))
+        # Assemble into a Gtable
+        legend_gt = assemble_legend(
+            decor, label_grobs, title_grob,
+            layout, sizes,
+            title_position="top",
+            padding_cm=PADDING_CM,
+            bg_colour="white",
+        )
+        legend_gtables.append(legend_gt)
 
-            elif has_size and not has_shape:
-                # Size legend: circle with mapped radius
-                from grid_py import circle_grob
-                mapped_size = float(size_val) if size_val is not None else 1.5
-                try:
-                    if np.isnan(mapped_size):
-                        mapped_size = 1.5
-                except (TypeError, ValueError):
-                    pass
-                r_npc = max(0.005, min(0.02, mapped_size * 0.003))
-                legend_children.append(circle_grob(
-                    x=0.10, y=ky - key_h_npc * 0.4,
-                    r=r_npc,
-                    gp=Gpar(fill="grey30", col=None),
-                    name=f"legend.key.size.{entry['title']}.{i}",
-                ))
-
-            else:
-                # Fallback: colour key (filled rect)
-                col_str = _safe_colour(colour_val if colour_val is not None else fill_val)
-                legend_children.append(rect_grob(
-                    x=0.05, y=ky, width=0.15, height=key_h_npc,
-                    just=("left", "top"),
-                    gp=Gpar(fill=col_str, col="grey60", lwd=0.5),
-                    name=f"legend.key.rect.{entry['title']}.{i}",
-                ))
-
-            # Label
-            lbl = entry["labels"][i] if i < len(entry["labels"]) else ""
-            legend_children.append(text_grob(
-                label=str(lbl),
-                x=0.25,
-                y=ky - key_h_npc * 0.5,
-                just=("left", "centre"),
-                gp=Gpar(fontsize=label_size, col=ltext_el["colour"]),
-                name=f"legend.label.{entry['title']}.{i}",
-            ))
-            y_npc -= step_npc
-
-        y_npc -= gap_npc
-
-    if not legend_children:
+    if not legend_gtables:
         return table
 
-    legend_tree = GTree(
-        children=GList(*legend_children),
-        name="guide-box",
+    # ------------------------------------------------------------------
+    # 6. Package multiple legends into a guide-box
+    # ------------------------------------------------------------------
+    guide_box = package_legend_box(
+        legend_gtables, position="right", spacing_cm=0.2,
     )
 
-    SPACING_CM = 0.2
-    from grid_py._units import unit_c
-    table = gtable_add_cols(table, unit([SPACING_CM], "cm"), pos=-1)
-    table = gtable_add_cols(table, unit([legend_w_cm], "cm"), pos=-1)
-    ncol = len(table._widths)
-    nrow = len(table._heights)
+    # ------------------------------------------------------------------
+    # 7. Place guide-box in the plot table
+    #    Mirrors R's table_add_legends (plot-render.R:98-105)
+    # ------------------------------------------------------------------
+    from ggplot2_py.guide_legend import _gtable_total_cm
+
+    guide_w_cm = _gtable_total_cm(guide_box.widths)
+    guide_w_cm = max(guide_w_cm, 1.0)
+
+    LEGEND_SPACING_CM = 0.2
+    table = gtable_add_cols(table, unit([LEGEND_SPACING_CM], "cm"), pos=-1)
+    table = gtable_add_cols(table, unit([guide_w_cm], "cm"), pos=-1)
+    ncol_t = len(table._widths)
+    nrow_t = len(table._heights)
     table = gtable_add_grob(
-        table, legend_tree, t=1, b=nrow, l=ncol,
-        clip="off", name="guide-box",
+        table, guide_box, t=1, b=nrow_t, l=ncol_t,
+        clip="off", name="guide-box-right",
     )
 
     return table

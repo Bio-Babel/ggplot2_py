@@ -445,7 +445,7 @@ class Facet(GGProto):
         gtable
         """
         from grid_py import GTree, GList, null_grob, Viewport
-        from gtable_py import Gtable, gtable_add_grob
+        from gtable_py import Gtable, gtable_add_grob, gtable_add_rows, gtable_add_cols
         from grid_py import Unit as unit
 
         nrow = int(layout["ROW"].max()) if len(layout) > 0 else 1
@@ -556,9 +556,39 @@ class Facet(GGProto):
                         name=f"axis-l-{r}-{c}",
                     )
 
+            # --- Secondary axes (top / right) ---
+            # Top axis: only for the first row when sec axis exists
+            is_top_row = (r == 1)
+            if is_top_row and hasattr(coord, "render_axis_h"):
+                axes_h = coord.render_axis_h(pp, theme)
+                top_ax = axes_h.get("top")
+                if top_ax is not None and not _is_null_grob(top_ax):
+                    if not hasattr(gt, "_has_top_axis"):
+                        gt = gtable_add_rows(gt, unit([AX_B_cm], "cm"), pos=0)
+                        gt._has_top_axis = True
+                    gt = gtable_add_grob(
+                        gt, top_ax, t=1, l=c + 1,
+                        clip="off", name=f"axis-t-{r}-{c}",
+                    )
+
+            # Right axis: only for the last column when sec axis exists
+            is_right_col = (c == ncol)
+            if is_right_col and hasattr(coord, "render_axis_v"):
+                axes_v = coord.render_axis_v(pp, theme)
+                right_ax = axes_v.get("right")
+                if right_ax is not None and not _is_null_grob(right_ax):
+                    if not hasattr(gt, "_has_right_axis"):
+                        gt = gtable_add_cols(gt, unit([AX_L_cm], "cm"), pos=-1)
+                        gt._has_right_axis = True
+                    ncol_now = len(gt._widths)
+                    gt = gtable_add_grob(
+                        gt, right_ax, t=r, l=ncol_now,
+                        clip="off", name=f"axis-r-{r}-{c}",
+                    )
+
         # --- Strip labels (R: FacetGrid adds top strips for cols,
         #     right strips for rows) ---
-        gt = self._add_strip_labels(gt, layout, nrow, ncol, params)
+        gt = self._add_strip_labels(gt, layout, nrow, ncol, params, theme)
 
         return gt
 
@@ -569,18 +599,18 @@ class Facet(GGProto):
         nrow: int,
         ncol: int,
         params: Dict[str, Any],
+        theme: Any = None,
     ) -> Any:
         """Add facet strip text labels to the gtable.
 
-        Mirrors R's ``FacetGrid$draw_panels`` strip assembly:
-        - Column strips (top): one per unique column, showing col var values
-        - Row strips (right): one per unique row, showing row var values
+        All visual properties resolved from theme via ``calc_element()``
+        for strip.background.x/y and strip.text.x/y.
         """
         from gtable_py import gtable_add_grob, gtable_add_rows, gtable_add_cols
         from grid_py import Unit as unit, text_grob, Gpar, rect_grob
         from grid_py._grob import grob_tree, GList
+        from ggplot2_py.coord import _resolve_element
 
-        # Detect faceting variables (columns besides PANEL/ROW/COL/SCALE_*/COORD)
         meta_cols = {"PANEL", "ROW", "COL", "SCALE_X", "SCALE_Y", "COORD"}
         facet_vars = [c for c in layout.columns if c not in meta_cols]
         if not facet_vars:
@@ -590,89 +620,64 @@ class Facet(GGProto):
         row_vars = _resolve_facet_vars(params.get("rows"))
         wrap_vars = _resolve_facet_vars(params.get("facets"))
 
-        # --- facet_wrap: one strip per panel, inserted above each
-        #     panel row.  R places strip labels on top of every panel. ---
+        # Resolve strip theme elements
+        strip_txt_x = _resolve_element("strip.text.x", theme,
+            {"colour": "grey10", "size": 8, "angle": 0})
+        strip_bg_x = _resolve_element("strip.background.x", theme,
+            {"fill": "grey85", "colour": None})
+        strip_txt_y = _resolve_element("strip.text.y", theme,
+            {"colour": "grey10", "size": 8, "angle": -90})
+        strip_bg_y = _resolve_element("strip.background.y", theme,
+            {"fill": "grey85", "colour": None})
+
+        def _make_strip(label_text, bg_el, txt_el, rot, name):
+            return grob_tree(
+                rect_grob(x=0.5, y=0.5, width=1, height=1,
+                          gp=Gpar(fill=bg_el["fill"], col=bg_el["colour"]),
+                          name=f"strip.bg.{name}"),
+                text_grob(label=label_text, x=0.5, y=0.5, rot=rot,
+                          just="centre",
+                          gp=Gpar(fontsize=float(txt_el["size"]),
+                                  col=txt_el["colour"]),
+                          name=f"strip.text.{name}"),
+                name=f"strip-{name}",
+            )
+
+        # --- facet_wrap ---
         if wrap_vars and not col_vars and not row_vars:
-            # Insert strip rows from bottom to top so row indices stay valid
             for r in range(nrow, 0, -1):
                 gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=r - 1)
-                # After insertion, the strip is at row r, panels shifted down
                 panels_in_row = layout[layout["ROW"] == r]
                 for _, row_info in panels_in_row.iterrows():
                     c = int(row_info["COL"])
-                    label_parts = [str(row_info.get(v, "")) for v in wrap_vars]
-                    label_text = " : ".join(label_parts)
-                    strip = grob_tree(
-                        rect_grob(x=0.5, y=0.5, width=1, height=1,
-                                  gp=Gpar(fill="grey85", col=None),
-                                  name=f"strip.bg.w.{r}.{c}"),
-                        text_grob(label=label_text, x=0.5, y=0.5,
-                                  just="centre", gp=Gpar(fontsize=7, col="grey10"),
-                                  name=f"strip.text.w.{r}.{c}"),
-                        name=f"strip-w-{r}-{c}",
-                    )
-                    gt = gtable_add_grob(
-                        gt, strip, t=r, l=c + 1,
-                        clip="off", name=f"strip-w-{r}-{c}",
-                    )
+                    label_text = " : ".join(str(row_info.get(v, "")) for v in wrap_vars)
+                    strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"w-{r}-{c}")
+                    gt = gtable_add_grob(gt, strip, t=r, l=c + 1,
+                                         clip="off", name=f"strip-w-{r}-{c}")
             return gt
 
-        # --- Top strip: one per column (col variable values) ---
+        # --- Top strip (col vars) ---
         if col_vars:
             gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=0)
             for c in range(1, ncol + 1):
                 panel_row = layout[layout["COL"] == c].iloc[0]
-                label_parts = [str(panel_row.get(v, "")) for v in col_vars]
-                label_text = " : ".join(label_parts)
+                label_text = " : ".join(str(panel_row.get(v, "")) for v in col_vars)
+                strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"t-{c}")
+                gt = gtable_add_grob(gt, strip, t=1, l=c + 1,
+                                     clip="off", name=f"strip-t-{c}")
 
-                strip = grob_tree(
-                    rect_grob(
-                        x=0.5, y=0.5, width=1, height=1,
-                        gp=Gpar(fill="grey85", col=None),
-                        name=f"strip.bg.top.{c}",
-                    ),
-                    text_grob(
-                        label=label_text, x=0.5, y=0.5,
-                        just="centre",
-                        gp=Gpar(fontsize=7, col="grey10"),
-                        name=f"strip.text.top.{c}",
-                    ),
-                    name=f"strip-t-{c}",
-                )
-                gt = gtable_add_grob(
-                    gt, strip, t=1, l=c + 1,
-                    clip="off", name=f"strip-t-{c}",
-                )
-
-        # --- Right strip: one per row (row variable values) ---
+        # --- Right strip (row vars) ---
         if row_vars:
             gt = gtable_add_cols(gt, unit([0.4], "cm"), pos=-1)
             ncol_now = len(gt._widths)
-            # Offset top strips if present
             row_offset = 1 if col_vars else 0
             for r in range(1, nrow + 1):
                 panel_row = layout[layout["ROW"] == r].iloc[0]
-                label_parts = [str(panel_row.get(v, "")) for v in row_vars]
-                label_text = " : ".join(label_parts)
-
-                strip = grob_tree(
-                    rect_grob(
-                        x=0.5, y=0.5, width=1, height=1,
-                        gp=Gpar(fill="grey85", col=None),
-                        name=f"strip.bg.right.{r}",
-                    ),
-                    text_grob(
-                        label=label_text, x=0.5, y=0.5,
-                        rot=270, just="centre",
-                        gp=Gpar(fontsize=7, col="grey10"),
-                        name=f"strip.text.right.{r}",
-                    ),
-                    name=f"strip-r-{r}",
-                )
-                gt = gtable_add_grob(
-                    gt, strip, t=r + row_offset, l=ncol_now,
-                    clip="off", name=f"strip-r-{r}",
-                )
+                label_text = " : ".join(str(panel_row.get(v, "")) for v in row_vars)
+                rot = float(strip_txt_y["angle"])
+                strip = _make_strip(label_text, strip_bg_y, strip_txt_y, rot, f"r-{r}")
+                gt = gtable_add_grob(gt, strip, t=r + row_offset, l=ncol_now,
+                                     clip="off", name=f"strip-r-{r}")
 
         return gt
 

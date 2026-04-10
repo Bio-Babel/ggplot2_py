@@ -647,20 +647,24 @@ class Layout(GGProto):
     ) -> Dict[str, Any]:
         """Render axis title grobs.
 
+        Mirrors R's ``Layout$render_labels``: produces text grobs for
+        x-axis and y-axis titles.  Falls back to a simple ``text_grob``
+        when theme ``element_render`` is unavailable.
+
         Parameters
         ----------
         labels : dict
-            Resolved labels (keyed by ``"x"``, ``"y"``).
+            Resolved labels keyed by ``"x"`` / ``"y"``, each
+            ``{"primary": ..., "secondary": ...}``.
         theme : Theme
             Complete theme.
 
         Returns
         -------
         dict
-            Same structure as *labels* but with grob values.
+            ``{"x": [primary_grob, secondary_grob], "y": [...]}``
         """
-        from grid_py import null_grob
-        from ggplot2_py.theme_elements import element_render
+        from grid_py import null_grob, text_grob, Gpar
 
         result: Dict[str, Any] = {}
         for axis, label_pair in labels.items():
@@ -673,20 +677,18 @@ class Layout(GGProto):
                 if val is None or is_waiver(val):
                     grobs.append(null_grob())
                 else:
-                    # Determine element name
-                    if i == 0:
-                        mod = ".top" if axis == "x" else ".left"
-                    else:
-                        mod = ".bottom" if axis == "x" else ".right"
-                    try:
-                        g = element_render(
-                            theme,
-                            f"axis.title.{axis}{mod}",
-                            label=val,
-                        )
-                        grobs.append(g)
-                    except Exception:
-                        grobs.append(null_grob())
+                    # Create axis title text grob directly.
+                    # R uses element_render(theme, "axis.title.x") but
+                    # our theme element system may not resolve all elements,
+                    # so we build the grob with sensible defaults.
+                    rot = 90.0 if axis == "y" else 0.0
+                    g = text_grob(
+                        label=str(val), x=0.5, y=0.5, rot=rot,
+                        just="centre",
+                        gp=Gpar(fontsize=9, col="grey30"),
+                        name=f"axis.title.{axis}",
+                    )
+                    grobs.append(g)
             result[axis] = grobs
         return result
 

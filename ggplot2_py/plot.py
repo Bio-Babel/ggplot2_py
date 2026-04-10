@@ -706,14 +706,17 @@ def ggplot_gtable(data: BuiltGGPlot) -> Any:
 
 
 def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
-    """Add title, subtitle, caption, tag annotations to the plot table.
+    """Add title, subtitle, caption annotations to the plot table.
+
+    Mirrors R's plot assembly in ``ggplot_gtable.R``: title and subtitle
+    are added as rows at the top, caption at the bottom.
 
     Parameters
     ----------
     table : gtable
         The plot gtable.
     labels : dict
-        Plot labels.
+        Plot labels (``title``, ``subtitle``, ``caption``).
     theme : Theme
         Complete theme.
 
@@ -722,8 +725,60 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     gtable
         Modified table.
     """
-    # Stub: in a full implementation this would render title/subtitle/caption
-    # grobs and add them to the gtable.  For now, pass through.
+    from gtable_py import gtable_add_grob, gtable_add_rows
+    from grid_py import Unit as unit, text_grob, Gpar
+
+    if not hasattr(table, "_widths"):
+        return table
+
+    ncol = len(table._widths)
+
+    # --- Caption (bottom) ---
+    caption = labels.get("caption")
+    if caption:
+        table = gtable_add_rows(table, unit([0.35], "cm"), pos=-1)
+        nrow = len(table._heights)
+        table = gtable_add_grob(
+            table,
+            text_grob(
+                label=str(caption), x=0.95, y=0.5,
+                just="right",
+                gp=Gpar(fontsize=7, col="grey30"),
+                name="caption",
+            ),
+            t=nrow, l=1, r=ncol, clip="off", name="caption",
+        )
+
+    # --- Subtitle (top, added first so title goes above) ---
+    subtitle = labels.get("subtitle")
+    if subtitle:
+        table = gtable_add_rows(table, unit([0.35], "cm"), pos=0)
+        table = gtable_add_grob(
+            table,
+            text_grob(
+                label=str(subtitle), x=0.5, y=0.5,
+                just="centre",
+                gp=Gpar(fontsize=8, col="grey30"),
+                name="subtitle",
+            ),
+            t=1, l=1, r=ncol, clip="off", name="subtitle",
+        )
+
+    # --- Title (top) ---
+    title = labels.get("title")
+    if title:
+        table = gtable_add_rows(table, unit([0.5], "cm"), pos=0)
+        table = gtable_add_grob(
+            table,
+            text_grob(
+                label=str(title), x=0.5, y=0.5,
+                just="centre",
+                gp=Gpar(fontsize=11, col="black", fontface="bold"),
+                name="title",
+            ),
+            t=1, l=1, r=ncol, clip="off", name="title",
+        )
+
     return table
 
 

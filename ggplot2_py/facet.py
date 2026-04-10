@@ -20,6 +20,15 @@ from ggplot2_py._compat import Waiver, is_waiver, waiver, cli_abort, cli_warn
 from ggplot2_py.ggproto import GGProto, ggproto
 from ggplot2_py._utils import snake_class, compact, modify_list, empty
 
+
+def _is_null_grob(grob: Any) -> bool:
+    """Check if a grob is a null grob (R semantics: zeroGrob / nullGrob)."""
+    if grob is None:
+        return True
+    cls = getattr(grob, "_grid_class", "")
+    name = getattr(grob, "_name", getattr(grob, "name", ""))
+    return cls == "null" or "null" in str(name).lower() or "zero" in str(name).lower()
+
 __all__ = [
     "Facet",
     "FacetNull",
@@ -547,6 +556,96 @@ class Facet(GGProto):
                         name=f"axis-l-{r}-{c}",
                     )
 
+        # --- Strip labels (R: FacetGrid adds top strips for cols,
+        #     right strips for rows) ---
+        gt = self._add_strip_labels(gt, layout, nrow, ncol, params)
+
+        return gt
+
+    def _add_strip_labels(
+        self,
+        gt: Any,
+        layout: pd.DataFrame,
+        nrow: int,
+        ncol: int,
+        params: Dict[str, Any],
+    ) -> Any:
+        """Add facet strip text labels to the gtable.
+
+        Mirrors R's ``FacetGrid$draw_panels`` strip assembly:
+        - Column strips (top): one per unique column, showing col var values
+        - Row strips (right): one per unique row, showing row var values
+        """
+        from gtable_py import gtable_add_grob, gtable_add_rows, gtable_add_cols
+        from grid_py import Unit as unit, text_grob, Gpar, rect_grob
+        from grid_py._grob import grob_tree, GList
+
+        # Detect faceting variables (columns besides PANEL/ROW/COL/SCALE_*/COORD)
+        meta_cols = {"PANEL", "ROW", "COL", "SCALE_X", "SCALE_Y", "COORD"}
+        facet_vars = [c for c in layout.columns if c not in meta_cols]
+        if not facet_vars:
+            return gt
+
+        col_vars = _resolve_facet_vars(params.get("cols"))
+        row_vars = _resolve_facet_vars(params.get("rows"))
+
+        # --- Top strip: one per column (col variable values) ---
+        if col_vars:
+            gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=0)
+            for c in range(1, ncol + 1):
+                panel_row = layout[layout["COL"] == c].iloc[0]
+                label_parts = [str(panel_row.get(v, "")) for v in col_vars]
+                label_text = " : ".join(label_parts)
+
+                strip = grob_tree(
+                    rect_grob(
+                        x=0.5, y=0.5, width=1, height=1,
+                        gp=Gpar(fill="grey85", col=None),
+                        name=f"strip.bg.top.{c}",
+                    ),
+                    text_grob(
+                        label=label_text, x=0.5, y=0.5,
+                        just="centre",
+                        gp=Gpar(fontsize=7, col="grey10"),
+                        name=f"strip.text.top.{c}",
+                    ),
+                    name=f"strip-t-{c}",
+                )
+                gt = gtable_add_grob(
+                    gt, strip, t=1, l=c + 1,
+                    clip="off", name=f"strip-t-{c}",
+                )
+
+        # --- Right strip: one per row (row variable values) ---
+        if row_vars:
+            gt = gtable_add_cols(gt, unit([0.4], "cm"), pos=-1)
+            ncol_now = len(gt._widths)
+            # Offset top strips if present
+            row_offset = 1 if col_vars else 0
+            for r in range(1, nrow + 1):
+                panel_row = layout[layout["ROW"] == r].iloc[0]
+                label_parts = [str(panel_row.get(v, "")) for v in row_vars]
+                label_text = " : ".join(label_parts)
+
+                strip = grob_tree(
+                    rect_grob(
+                        x=0.5, y=0.5, width=1, height=1,
+                        gp=Gpar(fill="grey85", col=None),
+                        name=f"strip.bg.right.{r}",
+                    ),
+                    text_grob(
+                        label=label_text, x=0.5, y=0.5,
+                        rot=270, just="centre",
+                        gp=Gpar(fontsize=7, col="grey10"),
+                        name=f"strip.text.right.{r}",
+                    ),
+                    name=f"strip-r-{r}",
+                )
+                gt = gtable_add_grob(
+                    gt, strip, t=r + row_offset, l=ncol_now,
+                    clip="off", name=f"strip-r-{r}",
+                )
+
         return gt
 
     def draw_labels(
@@ -562,21 +661,55 @@ class Facet(GGProto):
         labels: Dict[str, Any],
         params: Dict[str, Any],
     ) -> Any:
-        """Add axis title labels to the panel table.
+        """Add axis title labels (xlab/ylab) to the panel table.
+
+        Mirrors R's ``Facet$draw_labels``: adds a bottom row for the
+        x-axis title and a left column for the y-axis title.
 
         Parameters
         ----------
-        panels, layout, x_scales, y_scales, ranges, coord, data, theme,
-        labels, params
-            See ``draw_panels`` for shared arguments.
-
-        Returns
-        -------
-        gtable
+        panels : gtable
+        labels : dict
+            Rendered label grobs keyed by ``"x"`` / ``"y"``, each a
+            two-element list ``[primary, secondary]``.
         """
-        # labels is a dict like {"x": {"primary": "cty"}, "y": {"primary": "hwy"}}
-        # For now, axis titles are included as part of axis rendering
-        return panels
+        from gtable_py import gtable_add_grob, gtable_add_rows, gtable_add_cols
+        from grid_py import Unit as unit, text_grob, Gpar, null_grob
+
+        gt = panels
+
+        # --- x-axis title (bottom) ---
+        x_label = None
+        if "x" in labels:
+            pair = labels["x"]
+            if isinstance(pair, list) and len(pair) > 0:
+                x_label = pair[0]  # primary
+
+        if x_label is not None and not _is_null_grob(x_label):
+            gt = gtable_add_rows(gt, unit([0.4], "cm"), pos=-1)
+            nrow = len(gt._heights)
+            ncol = len(gt._widths)
+            gt = gtable_add_grob(
+                gt, x_label, t=nrow, l=1, r=ncol,
+                clip="off", name="xlab",
+            )
+
+        # --- y-axis title (left) ---
+        y_label = None
+        if "y" in labels:
+            pair = labels["y"]
+            if isinstance(pair, list) and len(pair) > 0:
+                y_label = pair[0]  # primary
+
+        if y_label is not None and not _is_null_grob(y_label):
+            gt = gtable_add_cols(gt, unit([0.4], "cm"), pos=0)
+            nrow = len(gt._heights)
+            gt = gtable_add_grob(
+                gt, y_label, t=1, b=nrow, l=1,
+                clip="off", name="ylab",
+            )
+
+        return gt
 
     def vars(self) -> List[str]:
         """Return the faceting variable names.

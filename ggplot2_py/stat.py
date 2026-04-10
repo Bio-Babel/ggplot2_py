@@ -5010,6 +5010,13 @@ class StatYdensity(Stat):
             width = (data["x"].max() - data["x"].min()) * 0.9
         dens["width"] = width
 
+        # R semantics: StatYdensity produces 'violinwidth' used by
+        # GeomViolin to vary the shape width by density.
+        #   scale="area"  → violinwidth = scaled (density/max per group)
+        #   scale="count" → violinwidth = scaled * n/max_n
+        #   scale="width" → violinwidth = scaled (same as area per group)
+        dens["violinwidth"] = dens["scaled"]
+
         # Add quantile information
         if quantiles is not None:
             quantiles = list(quantiles)

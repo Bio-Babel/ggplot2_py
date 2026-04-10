@@ -2022,6 +2022,13 @@ class GeomViolin(Geom):
     ) -> Any:
         """Draw a single violin."""
         data = data.copy()
+
+        # R semantics: filter out quantile marker rows (they have
+        # non-NaN 'quantile' values) — only the density curve rows
+        # form the violin polygon shape.
+        if "quantile" in data.columns:
+            data = data[data["quantile"].isna()].copy()
+
         if "violinwidth" in data.columns:
             data["xminv"] = data["x"] - data["violinwidth"] * (data["x"] - data.get("xmin", data["x"] - 0.45))
             data["xmaxv"] = data["x"] + data["violinwidth"] * (data.get("xmax", data["x"] + 0.45) - data["x"])
@@ -2029,13 +2036,12 @@ class GeomViolin(Geom):
             data["xminv"] = data.get("xmin", data["x"] - 0.45)
             data["xmaxv"] = data.get("xmax", data["x"] + 0.45)
 
-        upper = data.sort_values("y")[["y"]].copy()
-        upper["x"] = data.sort_values("y")["xminv"].values
-        lower = data.sort_values("y", ascending=False)[["y"]].copy()
-        lower["x"] = data.sort_values("y", ascending=False)["xmaxv"].values
+        # Build polygon: left side (sorted y ascending) + right side (descending)
+        sorted_data = data.sort_values("y")
+        upper = pd.DataFrame({"y": sorted_data["y"].values, "x": sorted_data["xminv"].values})
+        lower = pd.DataFrame({"y": sorted_data["y"].values[::-1], "x": sorted_data["xmaxv"].values[::-1]})
 
         newdata = pd.concat([upper, lower], ignore_index=True)
-        # Close polygon
         newdata = pd.concat([newdata, newdata.iloc[:1]], ignore_index=True)
 
         for col in ("colour", "fill", "linewidth", "linetype", "alpha"):
@@ -2449,17 +2455,22 @@ class GeomHex(Geom):
                     for c in viridis(t)
                 ]
 
-        # Hex half-widths.  R uses resolution(data$x) which returns the
-        # minimum non-zero gap.  For offset hex grids the offset gap is
-        # smaller than the bin width, so we use the median gap instead.
+        # R semantics: GeomHex uses resolution() on both x and y
+        # independently to compute hexagon vertex offsets.
+        #   dx = resolution(data$x, FALSE)
+        #   dy = resolution(data$y, FALSE) / sqrt(3) / 2
+        # We use median gap to avoid the offset-hex artefact.
         n = len(data)
-        if n > 1:
-            xu = np.sort(np.unique(data["x"].values))
-            diffs = np.diff(xu)
-            dx = float(np.median(diffs[diffs > 0])) if len(diffs[diffs > 0]) > 0 else 0.5
-        else:
-            dx = 0.5
-        dy = dx / np.sqrt(3)
+
+        def _median_res(vals):
+            u = np.sort(np.unique(vals))
+            if len(u) > 1:
+                d = np.diff(u)
+                return float(np.median(d[d > 0])) if len(d[d > 0]) > 0 else 0.5
+            return 0.5
+
+        dx = _median_res(data["x"].values)
+        dy = _median_res(data["y"].values) / np.sqrt(3) / 2
 
         angles = np.linspace(0, 2 * np.pi, 7)[:-1]
         hex_x = dx * np.cos(angles)

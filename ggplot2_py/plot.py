@@ -701,6 +701,23 @@ def ggplot_gtable(data: BuiltGGPlot) -> Any:
     return plot_table
 
 
+def _safe_colour(colour: Any) -> str:
+    """Validate a colour value, returning 'grey50' for invalid inputs."""
+    if colour is None:
+        return "grey50"
+    s = str(colour)
+    if s.startswith("#") and len(s) in (7, 9):
+        return s
+    # Use matplotlib to validate named colours
+    try:
+        from matplotlib.colors import is_color_like
+        if is_color_like(s):
+            return s
+    except (ImportError, ValueError):
+        pass
+    return "grey50"
+
+
 def _table_add_legends(
     table: Any, scales_list: Any, labels: Dict[str, Any], theme: Any,
 ) -> Any:
@@ -738,21 +755,27 @@ def _table_add_legends(
 
     for sc in np_scales.scales:
         aes_name = sc.aesthetics[0] if sc.aesthetics else "unknown"
-        # Get breaks and labels
-        try:
-            breaks = sc.get_breaks()
-        except Exception:
-            continue
-        if breaks is None or len(breaks) == 0:
-            continue
-        try:
-            mapped = sc.map(breaks)
-        except Exception:
-            mapped = breaks
 
-        try:
-            labs = sc.get_labels(breaks)
-        except Exception:
+        # Get breaks — skip scale if it has no breaks
+        breaks = getattr(sc, "get_breaks", lambda: None)()
+        if breaks is None or (hasattr(breaks, "__len__") and len(breaks) == 0):
+            continue
+
+        # Map breaks to aesthetic values (colours, sizes, etc.)
+        mapped = breaks  # default: use raw breaks
+        if hasattr(sc, "map"):
+            try:
+                mapped = sc.map(breaks)
+            except (TypeError, ValueError):
+                pass  # palette not ready; keep raw breaks
+
+        # Get labels
+        if hasattr(sc, "get_labels"):
+            try:
+                labs = sc.get_labels(breaks)
+            except (TypeError, ValueError, AttributeError):
+                labs = [str(b) for b in breaks]
+        else:
             labs = [str(b) for b in breaks]
 
         # Title from plot labels or scale name
@@ -782,14 +805,22 @@ def _table_add_legends(
         n = len(entry["breaks"])
         mapped = entry["mapped"]
 
-        # Title
+        # Title — resolve from theme
+        from ggplot2_py.coord import _resolve_element
+        ltitle_el = _resolve_element("legend.title", theme,
+            {"colour": "grey10", "size": 7})
         legend_children.append(text_grob(
             label=entry["title"], x=0.1, y=y_pos - spacing,
             just=("left", "top"),
-            gp=Gpar(fontsize=7, col="grey10", fontface="bold"),
+            gp=Gpar(fontsize=float(ltitle_el["size"]),
+                     col=ltitle_el["colour"], fontface="bold"),
             name=f"legend.title.{aes}",
         ))
         spacing += 0.04
+
+        # Legend label style from theme
+        ltext_el = _resolve_element("legend.text", theme,
+            {"colour": "grey20", "size": 6})
 
         # Key entries
         for i in range(min(n, 20)):  # cap at 20 entries
@@ -803,15 +834,7 @@ def _table_add_legends(
             # Determine if this is a colour/fill or shape/size guide
             if aes in ("colour", "color", "fill"):
                 # Colour key: small filled square
-                try:
-                    col_str = str(colour)
-                    if col_str.startswith("#") or col_str in ("red", "blue", "green",
-                        "black", "white", "grey", "grey50", "steelblue"):
-                        pass
-                    else:
-                        col_str = "grey50"
-                except Exception:
-                    col_str = "grey50"
+                col_str = _safe_colour(colour)
                 legend_children.append(rect_grob(
                     x=0.15, y=ky, width=0.06, height=0.025,
                     just=("left", "top"),
@@ -832,7 +855,8 @@ def _table_add_legends(
             legend_children.append(text_grob(
                 label=str(lbl), x=0.45, y=ky - 0.012,
                 just=("left", "centre"),
-                gp=Gpar(fontsize=6, col="grey20"),
+                gp=Gpar(fontsize=float(ltext_el["size"]),
+                         col=ltext_el["colour"]),
                 name=f"legend.label.{aes}.{i}",
             ))
             spacing += 0.035
@@ -881,6 +905,7 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     """
     from gtable_py import gtable_add_grob, gtable_add_rows
     from grid_py import Unit as unit, text_grob, Gpar
+    from ggplot2_py.coord import _resolve_element
 
     if not hasattr(table, "_widths"):
         return table
@@ -890,14 +915,16 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     # --- Caption (bottom) ---
     caption = labels.get("caption")
     if caption:
+        el = _resolve_element("plot.caption", theme,
+            {"colour": "grey30", "size": 7, "hjust": 1.0})
         table = gtable_add_rows(table, unit([0.35], "cm"), pos=-1)
         nrow = len(table._heights)
         table = gtable_add_grob(
             table,
             text_grob(
-                label=str(caption), x=0.95, y=0.5,
+                label=str(caption), x=float(el.get("hjust", 0.95)), y=0.5,
                 just="right",
-                gp=Gpar(fontsize=7, col="grey30"),
+                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
                 name="caption",
             ),
             t=nrow, l=1, r=ncol, clip="off", name="caption",
@@ -906,13 +933,15 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     # --- Subtitle (top, added first so title goes above) ---
     subtitle = labels.get("subtitle")
     if subtitle:
+        el = _resolve_element("plot.subtitle", theme,
+            {"colour": "grey30", "size": 8, "hjust": 0.5})
         table = gtable_add_rows(table, unit([0.35], "cm"), pos=0)
         table = gtable_add_grob(
             table,
             text_grob(
-                label=str(subtitle), x=0.5, y=0.5,
+                label=str(subtitle), x=float(el.get("hjust", 0.5)), y=0.5,
                 just="centre",
-                gp=Gpar(fontsize=8, col="grey30"),
+                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
                 name="subtitle",
             ),
             t=1, l=1, r=ncol, clip="off", name="subtitle",
@@ -921,13 +950,15 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     # --- Title (top) ---
     title = labels.get("title")
     if title:
+        el = _resolve_element("plot.title", theme,
+            {"colour": "black", "size": 11, "hjust": 0.5})
         table = gtable_add_rows(table, unit([0.5], "cm"), pos=0)
         table = gtable_add_grob(
             table,
             text_grob(
-                label=str(title), x=0.5, y=0.5,
+                label=str(title), x=float(el.get("hjust", 0.5)), y=0.5,
                 just="centre",
-                gp=Gpar(fontsize=11, col="black", fontface="bold"),
+                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
                 name="title",
             ),
             t=1, l=1, r=ncol, clip="off", name="title",

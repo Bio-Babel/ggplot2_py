@@ -826,6 +826,8 @@ def _table_add_legends(
             "title": str(title),
             "scale": sc,
             "is_continuous": not getattr(sc, "is_discrete", lambda: True)(),
+            "is_binned": sc.__class__.__name__.startswith("ScaleBinned") or
+                         getattr(sc, "guide", None) in ("bins", "coloursteps"),
         })
 
     if not raw_entries:
@@ -848,6 +850,7 @@ def _table_add_legends(
                 "aes_mapped": {entry["aesthetic"]: entry["mapped"]},
                 "scale": entry.get("scale"),
                 "is_continuous": entry.get("is_continuous", False),
+                "is_binned": entry.get("is_binned", False),
             }
     entries = list(merged.values())
 
@@ -888,7 +891,9 @@ def _table_add_legends(
     # ------------------------------------------------------------------
     from ggplot2_py.guide_colourbar import (
         extract_colourbar_decor,
+        extract_coloursteps_decor,
         build_colourbar_decor,
+        build_coloursteps_decor,
         build_colourbar_labels,
         build_colourbar_ticks,
         assemble_colourbar,
@@ -904,7 +909,60 @@ def _table_add_legends(
         aes_names = list(entry["aes_mapped"].keys())
         is_colour_fill = any(a in ("colour", "color", "fill") for a in aes_names)
         is_continuous = entry.get("is_continuous", False)
+        is_binned = entry.get("is_binned", False)
         sc = entry.get("scale")
+
+        # --- Coloursteps path: binned colour/fill scale ---
+        if is_colour_fill and is_binned and sc is not None:
+            title_grob = text_grob(
+                label=entry["title"],
+                x=0.0, y=0.5,
+                just=("left", "centre"),
+                gp=Gpar(
+                    fontsize=title_size,
+                    col=ltitle_el["colour"],
+                    fontface="bold",
+                ),
+                name=f"coloursteps.title.{entry['title']}",
+            )
+
+            # Extract stepped colour bins
+            decor = extract_coloursteps_decor(
+                sc, entry["breaks"], even_steps=True,
+            )
+
+            # Build stepped rectangle bar
+            bar_parts = build_coloursteps_decor(decor, direction="vertical")
+
+            # Labels and ticks (same as colourbar)
+            limits = sc.get_limits()
+            cb_labels = build_colourbar_labels(
+                entry["breaks"], entry["labels"], limits,
+                direction="vertical",
+                label_size=label_size, label_colour=ltext_el["colour"],
+            )
+            ticks = build_colourbar_ticks(
+                entry["breaks"], limits, direction="vertical",
+            )
+
+            max_lab_len = max((len(str(l)) for l in entry["labels"]), default=3)
+            label_w_cm = max(max_lab_len * 0.18, 0.5)
+
+            legend_gt = assemble_colourbar(
+                bar_grob=bar_parts["bar"],
+                frame_grob=bar_parts["frame"],
+                ticks_grob=ticks,
+                label_grobs=cb_labels,
+                title_grob=title_grob,
+                direction="vertical",
+                bar_width_cm=0.5,
+                bar_height_cm=3.0,
+                label_width_cm=label_w_cm,
+                padding_cm=PADDING_CM,
+                bg_colour="white",
+            )
+            legend_gtables.append(legend_gt)
+            continue
 
         # --- Colourbar path: continuous colour/fill scale ---
         if is_colour_fill and is_continuous and sc is not None:

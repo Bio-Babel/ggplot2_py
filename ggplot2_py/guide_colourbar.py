@@ -41,7 +41,9 @@ from gtable_py import (
 
 __all__ = [
     "extract_colourbar_decor",
+    "extract_coloursteps_decor",
     "build_colourbar_decor",
+    "build_coloursteps_decor",
     "build_colourbar_labels",
     "build_colourbar_ticks",
     "assemble_colourbar",
@@ -114,6 +116,146 @@ def extract_colourbar_decor(
         bar_values = bar_values[::-1]
 
     return {"colour": colours, "value": bar_values}
+
+
+# ---------------------------------------------------------------------------
+# extract_coloursteps_decor
+# ---------------------------------------------------------------------------
+
+def extract_coloursteps_decor(
+    scale: Any,
+    breaks: List[Any],
+    alpha: Optional[float] = None,
+    reverse: bool = False,
+    even_steps: bool = True,
+) -> Dict[str, Any]:
+    """Generate discrete colour bins from a binned scale's breaks.
+
+    Mirrors ``GuideColoursteps$extract_decor`` (guide-colorsteps.R:137-159).
+
+    Instead of a dense colour sequence, produces one colour per bin
+    between consecutive breaks.
+
+    Parameters
+    ----------
+    scale : Scale
+        A trained binned colour/fill scale.
+    breaks : list
+        Scale breaks (bin boundaries).
+    alpha : float or None
+        Optional alpha override.
+    reverse : bool
+        Reverse the colour order.
+    even_steps : bool
+        If ``True``, bins have equal visual width.
+
+    Returns
+    -------
+    dict
+        ``{"colour": list[str], "min": list[float], "max": list[float]}``
+    """
+    limits = scale.get_limits()
+    # Combine limits and breaks into sorted unique boundary set
+    boundaries = sorted(set(list(limits) + [float(b) for b in breaks
+                                             if b is not None and not
+                                             (isinstance(b, float) and np.isnan(b))]))
+    n = len(boundaries)
+    if n < 2:
+        return {"colour": [], "min": [], "max": []}
+
+    # Bin midpoints: map each mid value to get the bin colour
+    bin_mids = [(boundaries[i] + boundaries[i + 1]) / 2.0 for i in range(n - 1)]
+    colours = scale.map(np.array(bin_mids))
+    if isinstance(colours, np.ndarray):
+        colours = colours.tolist()
+
+    # Apply alpha
+    if alpha is not None and not (isinstance(alpha, float) and np.isnan(alpha)):
+        try:
+            from scales import alpha as _scales_alpha
+            colours = [_scales_alpha(c, alpha) for c in colours]
+        except Exception:
+            pass
+
+    # Even steps: use integer indices instead of actual break values
+    if even_steps:
+        mins = list(range(n - 1))
+        maxs = list(range(1, n))
+    else:
+        mins = boundaries[:-1]
+        maxs = boundaries[1:]
+
+    if reverse:
+        colours = list(reversed(colours))
+        mins = list(reversed(mins))
+        maxs = list(reversed(maxs))
+
+    return {"colour": colours, "min": mins, "max": maxs}
+
+
+def build_coloursteps_decor(
+    decor: Dict[str, Any],
+    direction: str = "vertical",
+) -> Dict[str, Any]:
+    """Build stepped rectangle grobs for coloursteps guide.
+
+    Mirrors ``GuideColoursteps$build_decor`` (guide-colorsteps.R:208-229).
+
+    Parameters
+    ----------
+    decor : dict
+        From :func:`extract_coloursteps_decor`.
+    direction : str
+        ``"vertical"`` or ``"horizontal"``.
+
+    Returns
+    -------
+    dict
+        ``{"bar": grob, "frame": grob}``
+    """
+    colours = decor["colour"]
+    mins = decor["min"]
+    maxs = decor["max"]
+    n = len(colours)
+
+    if n == 0:
+        return {"bar": null_grob(), "frame": null_grob()}
+
+    # Normalise positions to [0, 1]
+    all_vals = mins + maxs
+    lo = min(all_vals)
+    hi = max(all_vals)
+    rng = hi - lo if hi != lo else 1.0
+
+    norm_mins = [(v - lo) / rng for v in mins]
+    norm_maxs = [(v - lo) / rng for v in maxs]
+    sizes = [mx - mn for mn, mx in zip(norm_mins, norm_maxs)]
+
+    if direction == "vertical":
+        bar = rect_grob(
+            x=[0.0] * n, y=norm_mins,
+            width=[1.0] * n, height=sizes,
+            just=("left", "bottom"),
+            default_units="npc",
+            gp=Gpar(col=None, fill=colours),
+            name="coloursteps.bar",
+        )
+    else:
+        bar = rect_grob(
+            x=norm_mins, y=[0.0] * n,
+            width=sizes, height=[1.0] * n,
+            just=("left", "bottom"),
+            default_units="npc",
+            gp=Gpar(col=None, fill=colours),
+            name="coloursteps.bar",
+        )
+
+    frame = rect_grob(
+        gp=Gpar(col="grey50", fill=None, lwd=0.5),
+        name="coloursteps.frame",
+    )
+
+    return {"bar": bar, "frame": frame}
 
 
 # ---------------------------------------------------------------------------

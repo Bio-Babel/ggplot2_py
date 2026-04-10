@@ -4915,6 +4915,9 @@ class StatYdensity(Stat):
     def setup_params(self, data: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
         """Validate parameters.
 
+        In R, ``setup_params`` computes ``width = resolution(data$x) * 0.9``
+        when not explicitly set.
+
         Parameters
         ----------
         data : pd.DataFrame
@@ -4927,6 +4930,14 @@ class StatYdensity(Stat):
         params["flipped_aes"] = _has_flipped_aes(
             data, params, main_is_orthogonal=True, group_has_equal=True,
         )
+        # R: width <- params$width %||% (resolution(data$x, FALSE) * 0.9)
+        if params.get("width") is None and "x" in data.columns:
+            xu = np.sort(data["x"].dropna().unique())
+            if len(xu) > 1:
+                res = np.min(np.diff(xu))
+            else:
+                res = 1.0
+            params["width"] = float(res) * 0.9
         return params
 
     def compute_group(

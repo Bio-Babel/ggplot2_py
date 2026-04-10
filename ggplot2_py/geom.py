@@ -1298,8 +1298,6 @@ class GeomRibbon(Geom):
     ) -> Any:
         """Draw ribbon."""
         data = data.copy()
-        if "group" in data.columns:
-            data = data.sort_values("group")
 
         # Build polygon from upper + reversed lower
         upper = pd.DataFrame({"x": data["x"].values, "y": data["ymax"].values})
@@ -1362,6 +1360,8 @@ class GeomArea(GeomRibbon):
 
     def setup_params(self, data: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
         params["flipped_aes"] = params.get("flipped_aes", False)
+        # R semantics: GeomArea uses outline.type = "upper" (not "both")
+        params.setdefault("outline_type", "upper")
         return params
 
     def setup_data(self, data: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
@@ -2429,9 +2429,36 @@ class GeomHex(Geom):
         if data.empty:
             return null_grob()
 
-        # Approximate hexagon vertices
+        # R semantics: stat_bin_hex maps fill=after_stat(count).
+        # Apply count→fill mapping when fill is uniform (default).
+        if "count" in data.columns and "fill" in data.columns:
+            fills = data["fill"].values
+            if len(set(str(f) for f in fills)) <= 1:
+                # Map count to a blue gradient (matching R's default)
+                counts = data["count"].values.astype(float)
+                mn, mx = counts.min(), counts.max()
+                if mx > mn:
+                    t = (counts - mn) / (mx - mn)
+                else:
+                    t = np.full_like(counts, 0.5)
+                # Viridis-like: dark blue → yellow
+                from matplotlib.cm import viridis
+                data = data.copy()
+                data["fill"] = [
+                    f"#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}"
+                    for c in viridis(t)
+                ]
+
+        # Hex half-widths.  R uses resolution(data$x) which returns the
+        # minimum non-zero gap.  For offset hex grids the offset gap is
+        # smaller than the bin width, so we use the median gap instead.
         n = len(data)
-        dx = resolution(data["x"].values, zero=False) if len(data) > 1 else 0.5
+        if n > 1:
+            xu = np.sort(np.unique(data["x"].values))
+            diffs = np.diff(xu)
+            dx = float(np.median(diffs[diffs > 0])) if len(diffs[diffs > 0]) > 0 else 0.5
+        else:
+            dx = 0.5
         dy = dx / np.sqrt(3)
 
         angles = np.linspace(0, 2 * np.pi, 7)[:-1]

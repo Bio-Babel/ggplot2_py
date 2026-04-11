@@ -424,10 +424,12 @@ class Facet(GGProto):
     ) -> Any:
         """Assemble panels into a gtable with background, axes, and labels.
 
-        Mirrors R's ``Facet$draw_panels``:
-        1. Decorate each panel with coord background + foreground
-        2. Render axis grobs via coord
-        3. Assemble into a gtable with axis rows/columns
+        Mirrors R's ``Facet$draw_panels`` → ``init_gtable`` → ``attach_axes``
+        pipeline (facet-.R:501-532):
+
+        1. Create panel-only gtable with null units (init_gtable)
+        2. Decorate each panel with coord background + foreground
+        3. Render axis grobs, measure them, and attach as new rows/columns
 
         Parameters
         ----------
@@ -451,53 +453,23 @@ class Facet(GGProto):
         nrow = int(layout["ROW"].max()) if len(layout) > 0 else 1
         ncol = int(layout["COL"].max()) if len(layout) > 0 else 1
 
-        # Axis cell sizing — mirrors R's ggplot_gtable() which uses
-        # absolute units (cm) for axis cells and "null" for panels.
-        # In R, grobWidth()/grobHeight() compute the exact text size;
-        # we approximate using character count and a standard font size.
-        #
-        # R defaults: axis.ticks.length = unit(0.15, "cm"),
-        #   font ~11pt ≈ 0.39cm per character height,
-        #   character width ~0.6 × height ≈ 0.23cm
-        y_labels = ranges[0].get("y_labels", []) if ranges else []
-        x_labels = ranges[0].get("x_labels", []) if ranges else []
+        # ── Step 1: init_gtable — panel-only matrix (R: facet-.R:562-612)
+        # Panel sizes use "null" units (flexible, fill available space).
+        # Aspect ratio from coord is encoded in the null-unit ratio.
+        aspect_ratio = None
+        if hasattr(coord, "aspect") and ranges:
+            aspect_ratio = coord.aspect(ranges[0])
 
-        # Left axis width (cm): tick + gap + label text width
-        # R reference: tick=0.15cm, gap≈0.1cm, char≈0.22cm wide at 11pt
-        max_y_chars = max((len(str(l)) for l in y_labels), default=2)
-        AX_L_cm = 0.15 + 0.10 + max_y_chars * 0.22 + 0.10  # tick+gap+text+pad
-
-        # Bottom axis height (cm): detect whether labels will be rotated
-        # (mirrors the auto-rotation logic in _render_axis).
-        max_x_chars = max((len(str(l)) for l in x_labels), default=3)
-        x_breaks = ranges[0].get("x_major", np.array([])) if ranges else np.array([])
-        x_rotated = False
-        if len(x_breaks) > 1:
-            n_xb = len(x_breaks)
-            spacing = (x_breaks[-1] - x_breaks[0]) / max(n_xb - 1, 1)
-            est_width = max_x_chars * 0.016
-            x_rotated = n_xb > 1 and est_width > spacing * 0.9
-        if x_rotated:
-            # Rotated ~30°: projected height ≈ width * sin(30°) + charH * cos(30°)
-            AX_B_cm = 0.15 + 0.10 + max_x_chars * 0.22 * 0.5 + 0.39 * 0.87 + 0.10
-        else:
-            AX_B_cm = 0.15 + 0.10 + 0.39 + 0.10  # tick+gap+1 line height+pad
-
-        # Build gtable with mixed units: "cm" for axes, "null" for panels.
-        # This matches R's approach where axis cells have fixed absolute
-        # size and panels fill the remaining space.
-        from grid_py._units import unit_c
-        widths = unit_c(
-            unit([AX_L_cm], "cm"),
-            unit([1] * ncol, "null"),
-            unit([0.1], "cm"),
-        )
-        heights = unit_c(
-            unit([1] * nrow, "null"),
-            unit([AX_B_cm], "cm"),
-        )
+        panel_h = abs(aspect_ratio) if aspect_ratio is not None else 1.0
+        widths = unit([1] * ncol, "null")
+        heights = unit([panel_h] * nrow, "null")
         gt = Gtable(widths=widths, heights=heights, name="layout")
 
+        # Mark respect flag for aspect ratio (R: facet-.R:592)
+        if aspect_ratio is not None:
+            gt._respect = True
+
+        # ── Step 2: Place decorated panels into the gtable
         for _, row_info in layout.iterrows():
             panel_id = int(row_info["PANEL"])
             r = int(row_info["ROW"])
@@ -505,7 +477,7 @@ class Facet(GGProto):
             panel_idx = panel_id - 1
             pp = ranges[panel_idx] if panel_idx < len(ranges) else {}
 
-            # --- Collect geom grobs for this panel ---
+            # Collect geom grobs for this panel
             panel_grobs = []
             for layer_grobs in panels:
                 if isinstance(layer_grobs, list) and panel_idx < len(layer_grobs):
@@ -513,9 +485,7 @@ class Facet(GGProto):
                 elif not isinstance(layer_grobs, list) and layer_grobs is not None:
                     panel_grobs.append(layer_grobs)
 
-            # --- Decorate panel with background + foreground ---
-            # coord.draw_panel wraps in a Viewport so NPC [0,1] maps
-            # to the panel cell region (R semantics).
+            # Decorate panel with coord background + foreground
             if hasattr(coord, "draw_panel"):
                 decorated = coord.draw_panel(panel_grobs, pp, theme)
             else:
@@ -524,71 +494,98 @@ class Facet(GGProto):
                     name=f"panel-{panel_id}",
                 )
 
-            # Place panel in cell (r, c+1) — offset by 1 for left axis col
             gt = gtable_add_grob(
-                gt, decorated, t=r, l=c + 1, name=f"panel-{r}-{c}",
+                gt, decorated, t=r, l=c, name=f"panel-{r}-{c}",
             )
 
-            # --- Axes: only on the edges, matching R's facet semantics ---
-            # R adds axis grobs with clip="off" so labels are not clipped
-            # at the cell boundary.
-            # Bottom axis: only for the last row
-            is_bottom_row = (r == nrow)
-            if is_bottom_row and hasattr(coord, "render_axis_h"):
-                axes_h = coord.render_axis_h(pp, theme)
-                bottom_ax = axes_h.get("bottom")
-                if bottom_ax is not None:
-                    gt = gtable_add_grob(
-                        gt, bottom_ax, t=nrow + 1, l=c + 1,
-                        clip="off",
-                        name=f"axis-b-{r}-{c}",
-                    )
+        # ── Step 3: Render axes and attach with measured sizes
+        # (R: facet-.R attach_axes → seam_table → max_height/max_width)
+        #
+        # Render axis grobs for each unique scale, then attach as new
+        # rows/columns with sizes from grob._height_cm / _width_cm.
 
-            # Left axis: only for the first column
-            is_left_col = (c == 1)
-            if is_left_col and hasattr(coord, "render_axis_v"):
+        # Collect axis grobs across all panels to find max sizes
+        left_axes = []
+        bottom_axes = []
+        top_axes = []
+        right_axes = []
+
+        for _, row_info in layout.iterrows():
+            panel_idx = int(row_info["PANEL"]) - 1
+            r = int(row_info["ROW"])
+            c = int(row_info["COL"])
+            pp = ranges[panel_idx] if panel_idx < len(ranges) else {}
+
+            if hasattr(coord, "render_axis_v"):
                 axes_v = coord.render_axis_v(pp, theme)
-                left_ax = axes_v.get("left")
-                if left_ax is not None:
-                    gt = gtable_add_grob(
-                        gt, left_ax, t=r, l=1,
-                        clip="off",
-                        name=f"axis-l-{r}-{c}",
-                    )
+                if c == 1:
+                    left_ax = axes_v.get("left")
+                    if left_ax is not None and not _is_null_grob(left_ax):
+                        left_axes.append((r, left_ax))
+                if c == ncol:
+                    right_ax = axes_v.get("right")
+                    if right_ax is not None and not _is_null_grob(right_ax):
+                        right_axes.append((r, right_ax))
 
-            # --- Secondary axes (top / right) ---
-            # Top axis: only for the first row when sec axis exists
-            is_top_row = (r == 1)
-            if is_top_row and hasattr(coord, "render_axis_h"):
+            if hasattr(coord, "render_axis_h"):
                 axes_h = coord.render_axis_h(pp, theme)
-                top_ax = axes_h.get("top")
-                if top_ax is not None and not _is_null_grob(top_ax):
-                    if not hasattr(gt, "_has_top_axis"):
-                        gt = gtable_add_rows(gt, unit([AX_B_cm], "cm"), pos=0)
-                        gt._has_top_axis = True
-                    gt = gtable_add_grob(
-                        gt, top_ax, t=1, l=c + 1,
-                        clip="off", name=f"axis-t-{r}-{c}",
-                    )
+                if r == nrow:
+                    bottom_ax = axes_h.get("bottom")
+                    if bottom_ax is not None and not _is_null_grob(bottom_ax):
+                        bottom_axes.append((c, bottom_ax))
+                if r == 1:
+                    top_ax = axes_h.get("top")
+                    if top_ax is not None and not _is_null_grob(top_ax):
+                        top_axes.append((c, top_ax))
 
-            # Right axis: only for the last column when sec axis exists
-            is_right_col = (c == ncol)
-            if is_right_col and hasattr(coord, "render_axis_v"):
-                axes_v = coord.render_axis_v(pp, theme)
-                right_ax = axes_v.get("right")
-                if right_ax is not None and not _is_null_grob(right_ax):
-                    if not hasattr(gt, "_has_right_axis"):
-                        gt = gtable_add_cols(gt, unit([AX_L_cm], "cm"), pos=-1)
-                        gt._has_right_axis = True
-                    ncol_now = len(gt._widths)
-                    gt = gtable_add_grob(
-                        gt, right_ax, t=r, l=ncol_now,
-                        clip="off", name=f"axis-r-{r}-{c}",
-                    )
+        # Track column offset from left-axis insertion
+        col_offset = 0
 
-        # --- Strip labels (R: FacetGrid adds top strips for cols,
-        #     right strips for rows) ---
-        gt = self._add_strip_labels(gt, layout, nrow, ncol, params, theme)
+        # ── Attach left axis (R: seam_table side="left")
+        if left_axes:
+            max_w = max(getattr(ax, "_width_cm", 0.8) or 0.8 for _, ax in left_axes)
+            gt = gtable_add_cols(gt, unit([max_w], "cm"), pos=0)
+            col_offset = 1
+            for r, ax in left_axes:
+                gt = gtable_add_grob(
+                    gt, ax, t=r, l=1, clip="off", name=f"axis-l-{r}",
+                )
+
+        # ── Attach right axis (R: seam_table side="right")
+        if right_axes:
+            max_w = max(getattr(ax, "_width_cm", 0.8) or 0.8 for _, ax in right_axes)
+            gt = gtable_add_cols(gt, unit([max_w], "cm"), pos=-1)
+            ncol_now = len(gt._widths)
+            for r, ax in right_axes:
+                gt = gtable_add_grob(
+                    gt, ax, t=r, l=ncol_now, clip="off", name=f"axis-r-{r}",
+                )
+
+        # ── Attach bottom axis (R: seam_table side="bottom")
+        if bottom_axes:
+            max_h = max(getattr(ax, "_height_cm", 0.6) or 0.6 for _, ax in bottom_axes)
+            gt = gtable_add_rows(gt, unit([max_h], "cm"), pos=-1)
+            nrow_now = len(gt._heights)
+            for c, ax in bottom_axes:
+                gt = gtable_add_grob(
+                    gt, ax, t=nrow_now, l=c + col_offset, clip="off",
+                    name=f"axis-b-{c}",
+                )
+
+        # ── Attach top axis (R: seam_table side="top")
+        if top_axes:
+            max_h = max(getattr(ax, "_height_cm", 0.6) or 0.6 for _, ax in top_axes)
+            gt = gtable_add_rows(gt, unit([max_h], "cm"), pos=0)
+            for c, ax in top_axes:
+                gt = gtable_add_grob(
+                    gt, ax, t=1, l=c + col_offset, clip="off",
+                    name=f"axis-t-{c}",
+                )
+
+        # ── Strip labels — pass col_offset so strips align with panels
+        gt = self._add_strip_labels(
+            gt, layout, nrow, ncol, params, theme, col_offset=col_offset,
+        )
 
         return gt
 
@@ -600,6 +597,7 @@ class Facet(GGProto):
         ncol: int,
         params: Dict[str, Any],
         theme: Any = None,
+        col_offset: int = 0,
     ) -> Any:
         """Add facet strip text labels to the gtable.
 
@@ -666,7 +664,7 @@ class Facet(GGProto):
                     c = int(row_info["COL"])
                     label_text = _get_strip_text(wrap_vars, row_info)
                     strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"w-{r}-{c}")
-                    gt = gtable_add_grob(gt, strip, t=r, l=c + 1,
+                    gt = gtable_add_grob(gt, strip, t=r, l=c + col_offset,
                                          clip="off", name=f"strip-w-{r}-{c}")
             return gt
 
@@ -677,7 +675,7 @@ class Facet(GGProto):
                 panel_row = layout[layout["COL"] == c].iloc[0]
                 label_text = _get_strip_text(col_vars, panel_row)
                 strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"t-{c}")
-                gt = gtable_add_grob(gt, strip, t=1, l=c + 1,
+                gt = gtable_add_grob(gt, strip, t=1, l=c + col_offset,
                                      clip="off", name=f"strip-t-{c}")
 
         # --- Right strip (row vars) ---

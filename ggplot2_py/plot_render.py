@@ -498,13 +498,15 @@ def _table_add_legends(
     guide_w_cm = _gtable_total_cm(guide_box.widths)
     guide_w_cm = max(guide_w_cm, 1.0)
 
+    # R: place <- find_panel(table); t=place$t, b=place$b  (plot-render.R:96-104)
+    place = find_panel(table)
+
     LEGEND_SPACING_CM = 0.2
     table = gtable_add_cols(table, unit([LEGEND_SPACING_CM], "cm"), pos=-1)
     table = gtable_add_cols(table, unit([guide_w_cm], "cm"), pos=-1)
     ncol_t = len(table._widths)
-    nrow_t = len(table._heights)
     table = gtable_add_grob(
-        table, guide_box, t=1, b=nrow_t, l=ncol_t,
+        table, guide_box, t=place["t"], b=place["b"], l=ncol_t,
         clip="off", name="guide-box-right",
     )
 
@@ -618,6 +620,9 @@ def ggplotGrob(plot: "GGPlot") -> Any:
 def find_panel(table: Any) -> Dict[str, Any]:
     """Find the panel area in a gtable.
 
+    Mirrors R's ``find_panel()`` in ``layout.R``.  Supports gtable layouts
+    stored as either a ``pd.DataFrame`` or a plain dict-of-lists.
+
     Parameters
     ----------
     table : gtable
@@ -628,9 +633,14 @@ def find_panel(table: Any) -> Dict[str, Any]:
     dict
         ``{"t": int, "l": int, "b": int, "r": int}`` panel bounds.
     """
-    if hasattr(table, "layout") and isinstance(table.layout, pd.DataFrame):
-        panel_rows = table.layout.loc[
-            table.layout["name"].str.contains("panel", case=False, na=False)
+    layout = getattr(table, "layout", None)
+    if layout is None:
+        return {"t": 1, "l": 1, "b": 1, "r": 1}
+
+    # --- DataFrame path ---
+    if isinstance(layout, pd.DataFrame):
+        panel_rows = layout.loc[
+            layout["name"].str.contains("panel", case=False, na=False)
         ]
         if not panel_rows.empty:
             return {
@@ -639,6 +649,20 @@ def find_panel(table: Any) -> Dict[str, Any]:
                 "b": int(panel_rows["b"].max()),
                 "r": int(panel_rows["r"].max()),
             }
+
+    # --- dict-of-lists path (gtable_py stores layout this way) ---
+    elif isinstance(layout, dict) and "name" in layout:
+        names = layout["name"]
+        indices = [i for i, n in enumerate(names)
+                   if isinstance(n, str) and "panel" in n.lower()]
+        if indices:
+            return {
+                "t": min(layout["t"][i] for i in indices),
+                "l": min(layout["l"][i] for i in indices),
+                "b": max(layout["b"][i] for i in indices),
+                "r": max(layout["r"][i] for i in indices),
+            }
+
     return {"t": 1, "l": 1, "b": 1, "r": 1}
 
 

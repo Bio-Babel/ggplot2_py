@@ -1880,10 +1880,37 @@ class GeomBoxplot(Geom):
         return params
 
     def setup_data(self, data: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
+        """Prepare boxplot data: compute box width and outlier-inclusive ranges.
+
+        Mirrors R's ``GeomBoxplot$setup_data`` (geom-boxplot.R:257-286).
+        Adds ``ymin_final``/``ymax_final`` columns that include outlier
+        values, ensuring the y-scale is trained on the full data extent.
+        """
         data = data.copy()
         width = params.get("width") or (data["width"].values if "width" in data.columns else 0.9)
         if isinstance(width, (int, float)):
             data["width"] = width
+
+        # Compute ymin_final / ymax_final from outliers
+        # (R: geom-boxplot.R:266-274)
+        if "outliers" in data.columns:
+            ymin_final = []
+            ymax_final = []
+            for _, row in data.iterrows():
+                outliers = row.get("outliers", [])
+                if outliers is None or (isinstance(outliers, float) and np.isnan(outliers)):
+                    outliers = []
+                if isinstance(outliers, np.ndarray):
+                    outliers = outliers.tolist()
+                if len(outliers) > 0:
+                    ymin_final.append(min(min(outliers), row.get("ymin", np.inf)))
+                    ymax_final.append(max(max(outliers), row.get("ymax", -np.inf)))
+                else:
+                    ymin_final.append(row.get("ymin", np.nan))
+                    ymax_final.append(row.get("ymax", np.nan))
+            data["ymin_final"] = ymin_final
+            data["ymax_final"] = ymax_final
+
         data["xmin"] = data["x"] - data["width"] / 2
         data["xmax"] = data["x"] + data["width"] / 2
         return data

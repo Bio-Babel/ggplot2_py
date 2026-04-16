@@ -231,7 +231,14 @@ def make_labels(mapping: Any) -> Dict[str, str]:
     """
     from ggplot2_py.aes import Mapping, AfterStat, AfterScale, Stage
 
-    if not isinstance(mapping, Mapping):
+    # Accept both ``Mapping`` (from ``aes()``) and plain ``dict``
+    # (used by Stat.default_aes / Geom.default_aes).  R's
+    # ``make_labels()`` treats any named list uniformly (labels.R:124).
+    if isinstance(mapping, Mapping):
+        mapping_items = mapping.items()
+    elif isinstance(mapping, dict):
+        mapping_items = mapping.items()
+    else:
         return {}
 
     def _label_for(val: Any) -> str:
@@ -243,7 +250,7 @@ def make_labels(mapping: Any) -> Dict[str, str]:
         return str(val)
 
     result: Dict[str, str] = {}
-    for aes_name, val in mapping.items():
+    for aes_name, val in mapping_items:
         if val is None:
             result[aes_name] = aes_name
         elif isinstance(val, str):

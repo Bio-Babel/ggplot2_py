@@ -272,104 +272,63 @@ def guide_grid(
         rect_grob, polyline_grob, grob_tree,
         null_grob, Gpar, Unit, GTree, GList,
     )
+    # R: guide_grid() (guides-grid.R:6-41) — always uses element_render(),
+    # no try/except fallback.  Theme element → grob via element_grob().
     from ggplot2_py.theme_elements import element_render
 
     children = []
 
-    # 1. Panel background
-    try:
-        bg = element_render(theme, "panel.background")
-        if bg is not None:
-            children.append(bg)
-    except Exception:
-        children.append(rect_grob(
-            x=0.5, y=0.5, width=1.0, height=1.0,
-            gp=Gpar(fill="white", col="transparent"),
-            name="panel.background",
-        ))
+    # 1. Panel background (R: guides-grid.R:32)
+    bg = element_render(theme, "panel.background")
+    if bg is not None:
+        children.append(bg)
 
     x_major = panel_params.get("x_major", np.array([]))
     x_minor = panel_params.get("x_minor", np.array([]))
     y_major = panel_params.get("y_major", np.array([]))
     y_minor = panel_params.get("y_minor", np.array([]))
 
-    # 2. Minor grid lines (all in [0,1] NPC — the panel viewport handles placement)
+    # 2. Minor grid lines (R: breaks_as_grid, guides-grid.R:43-60)
     if len(y_minor) > 0:
-        try:
-            grob = element_render(
-                theme, "panel.grid.minor.y",
-                x=np.tile([0.0, 1.0], len(y_minor)),
-                y=np.repeat(y_minor, 2),
-                id_lengths=[2] * len(y_minor),
-            )
-            if grob is not None:
-                children.append(grob)
-        except Exception:
-            children.append(polyline_grob(
-                x=np.tile([0.0, 1.0], len(y_minor)),
-                y=np.repeat(y_minor, 2),
-                id=np.repeat(np.arange(1, len(y_minor) + 1), 2),
-                gp=Gpar(col="grey92", lwd=0.5),
-                name="grid.minor.y",
-            ))
+        grob = element_render(
+            theme, "panel.grid.minor.y",
+            x=np.tile([0.0, 1.0], len(y_minor)),
+            y=np.repeat(y_minor, 2),
+            id_lengths=[2] * len(y_minor),
+        )
+        if grob is not None:
+            children.append(grob)
 
     if len(x_minor) > 0:
-        try:
-            grob = element_render(
-                theme, "panel.grid.minor.x",
-                x=np.repeat(x_minor, 2),
-                y=np.tile([0.0, 1.0], len(x_minor)),
-                id_lengths=[2] * len(x_minor),
-            )
-            if grob is not None:
-                children.append(grob)
-        except Exception:
-            children.append(polyline_grob(
-                x=np.repeat(x_minor, 2),
-                y=np.tile([0.0, 1.0], len(x_minor)),
-                id=np.repeat(np.arange(1, len(x_minor) + 1), 2),
-                gp=Gpar(col="grey92", lwd=0.5),
-                name="grid.minor.x",
-            ))
+        grob = element_render(
+            theme, "panel.grid.minor.x",
+            x=np.repeat(x_minor, 2),
+            y=np.tile([0.0, 1.0], len(x_minor)),
+            id_lengths=[2] * len(x_minor),
+        )
+        if grob is not None:
+            children.append(grob)
 
     # 3. Major grid lines
     if len(y_major) > 0:
-        try:
-            grob = element_render(
-                theme, "panel.grid.major.y",
-                x=np.tile([0.0, 1.0], len(y_major)),
-                y=np.repeat(y_major, 2),
-                id_lengths=[2] * len(y_major),
-            )
-            if grob is not None:
-                children.append(grob)
-        except Exception:
-            children.append(polyline_grob(
-                x=np.tile([0.0, 1.0], len(y_major)),
-                y=np.repeat(y_major, 2),
-                id=np.repeat(np.arange(1, len(y_major) + 1), 2),
-                gp=Gpar(col="white", lwd=1.0),
-                name="grid.major.y",
-            ))
+        grob = element_render(
+            theme, "panel.grid.major.y",
+            x=np.tile([0.0, 1.0], len(y_major)),
+            y=np.repeat(y_major, 2),
+            id_lengths=[2] * len(y_major),
+        )
+        if grob is not None:
+            children.append(grob)
 
     if len(x_major) > 0:
-        try:
-            grob = element_render(
-                theme, "panel.grid.major.x",
-                x=np.repeat(x_major, 2),
-                y=np.tile([0.0, 1.0], len(x_major)),
-                id_lengths=[2] * len(x_major),
-            )
-            if grob is not None:
-                children.append(grob)
-        except Exception:
-            children.append(polyline_grob(
-                x=np.repeat(x_major, 2),
-                y=np.tile([0.0, 1.0], len(x_major)),
-                id=np.repeat(np.arange(1, len(x_major) + 1), 2),
-                gp=Gpar(col="white", lwd=1.0),
-                name="grid.major.x",
-            ))
+        grob = element_render(
+            theme, "panel.grid.major.x",
+            x=np.repeat(x_major, 2),
+            y=np.tile([0.0, 1.0], len(x_major)),
+            id_lengths=[2] * len(x_major),
+        )
+        if grob is not None:
+            children.append(grob)
 
     if not children:
         return null_grob()

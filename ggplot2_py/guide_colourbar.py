@@ -60,7 +60,6 @@ _DEFAULT_LABEL_SIZE: float = 6.0
 _DEFAULT_TITLE_SIZE: float = 7.0
 _DEFAULT_PADDING_CM: float = 0.15
 _DEFAULT_TICK_LENGTH_CM: float = 0.1
-_CHAR_WIDTH_CM: float = 0.18
 
 
 # ---------------------------------------------------------------------------

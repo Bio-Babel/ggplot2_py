@@ -40,6 +40,21 @@ __all__ = [
 ]
 
 
+def _legend_label_width_cm(labels: List[Any], fontsize: float = 6.0) -> float:
+    """Measure max label width in cm using Cairo font metrics.
+
+    Replaces ``max(len(str(l)) for l in labels) * 0.18`` with actual
+    text measurement, matching R's ``width_cm(grobs$labels)`` pattern.
+    """
+    from grid_py._size import calc_string_metric
+    from grid_py import Gpar
+    max_w = 0.0
+    for l in labels:
+        m = calc_string_metric(str(l), Gpar(fontsize=fontsize))
+        max_w = max(max_w, m["width"] * 2.54)  # inches → cm
+    return max(max_w, 0.3)  # minimum width 0.3 cm
+
+
 @singledispatch
 def ggplot_gtable(data: Any) -> Any:
     """Convert a built ggplot to a gtable for rendering.
@@ -285,23 +300,66 @@ def _table_add_legends(
     entries = list(merged.values())
 
     # ------------------------------------------------------------------
-    # 3. Resolve theme elements
+    # 3. Resolve theme elements (R: calc_element for proper inheritance)
+    #    R always has a complete theme.  If Python's theme is None or
+    #    incomplete, reset the element tree and use theme_grey().
     # ------------------------------------------------------------------
-    from ggplot2_py.coord import _resolve_element
+    from ggplot2_py.theme_elements import calc_element as _calc_theme_el
 
-    ltitle_el = _resolve_element("legend.title", theme,
-        {"colour": "grey10", "size": 7})
-    ltext_el = _resolve_element("legend.text", theme,
-        {"colour": "grey20", "size": 6})
+    if theme is None:
+        from ggplot2_py.theme_defaults import theme_grey
+        theme = theme_grey()
 
-    title_size = float(ltitle_el["size"])
-    label_size = float(ltext_el["size"])
+    _ltitle_raw = _calc_theme_el("legend.title", theme)
+    if _ltitle_raw is None:
+        from ggplot2_py.theme_elements import reset_theme_settings
+        reset_theme_settings()
+        from ggplot2_py.theme_defaults import theme_grey as _tg
+        theme = _tg()
+        _ltitle_raw = _calc_theme_el("legend.title", theme)
+    _ltext_raw = _calc_theme_el("legend.text", theme)
 
-    KEY_W_CM = 0.5
-    KEY_H_CM = 0.5
-    SPACING_X_CM = 0.15
-    SPACING_Y_CM = 0.0
-    PADDING_CM = 0.15
+    title_size = float(_ltitle_raw.size)
+    label_size = float(_ltext_raw.size)
+    _ltitle_colour = _ltitle_raw.colour
+    _ltext_colour = _ltext_raw.colour
+
+    # Resolve legend key dimensions from theme
+    # (R: GuideLegend$override_elements → width_cm/height_cm of theme units)
+    from ggplot2_py.theme_elements import calc_element as _calc_el
+    from grid_py import Unit as _Unit, convert_width, convert_height
+
+    def _unit_to_cm(u, axis="height"):
+        """Convert a theme Unit to cm using grid's **device-default** gp.
+
+        Mirrors R's ``convertUnit(u, "cm", valueOnly=TRUE)`` called at
+        gtable-construction time (pre-draw, no viewport active): R's
+        grid falls back to the device default gp (``fontsize=12``,
+        ``lineheight=1.2``).  R's ggplot2 uses this device default —
+        **not** the theme's ``text`` element — when computing static
+        layout sizes such as ``legend.key.width``.  grid_py's
+        ``convert_*`` with no active viewport reproduces the same
+        behaviour, so we just call it directly.
+        """
+        if u is None or not isinstance(u, _Unit):
+            return None
+        fn = convert_height if axis == "height" else convert_width
+        cm = fn(u, "cm", valueOnly=True)
+        val = float(np.sum(cm))
+        return val if val > 0 else None
+
+    key_size = _unit_to_cm(_calc_el("legend.key.size", theme))
+    key_w = _unit_to_cm(_calc_el("legend.key.width", theme), "width")
+    key_h = _unit_to_cm(_calc_el("legend.key.height", theme))
+    spacing_x = _unit_to_cm(_calc_el("legend.key.spacing.x", theme), "width")
+    spacing_y = _unit_to_cm(_calc_el("legend.key.spacing.y", theme))
+    legend_spacing = _unit_to_cm(_calc_el("legend.spacing", theme))
+
+    KEY_W_CM = key_w or key_size
+    KEY_H_CM = key_h or key_size
+    SPACING_X_CM = spacing_x
+    SPACING_Y_CM = spacing_y
+    PADDING_CM = 0.15  # R: legend.margin default padding
 
     # ------------------------------------------------------------------
     # 4. Determine draw_key function from layers
@@ -350,7 +408,7 @@ def _table_add_legends(
                 just=("left", "centre"),
                 gp=Gpar(
                     fontsize=title_size,
-                    col=ltitle_el["colour"],
+                    col=_ltitle_colour,
                     fontface="bold",
                 ),
                 name=f"coloursteps.title.{entry['title']}",
@@ -369,14 +427,13 @@ def _table_add_legends(
             cb_labels = build_colourbar_labels(
                 entry["breaks"], entry["labels"], limits,
                 direction="vertical",
-                label_size=label_size, label_colour=ltext_el["colour"],
+                label_size=label_size, label_colour=_ltext_colour,
             )
             ticks = build_colourbar_ticks(
                 entry["breaks"], limits, direction="vertical",
             )
 
-            max_lab_len = max((len(str(l)) for l in entry["labels"]), default=3)
-            label_w_cm = max(max_lab_len * 0.18, 0.5)
+            label_w_cm = _legend_label_width_cm(entry["labels"], label_size)
 
             legend_gt = assemble_colourbar(
                 bar_grob=bar_parts["bar"],
@@ -385,8 +442,8 @@ def _table_add_legends(
                 label_grobs=cb_labels,
                 title_grob=title_grob,
                 direction="vertical",
-                bar_width_cm=0.5,
-                bar_height_cm=3.0,
+                bar_width_cm=KEY_W_CM,
+                bar_height_cm=KEY_H_CM * 5,
                 label_width_cm=label_w_cm,
                 padding_cm=PADDING_CM,
                 bg_colour="white",
@@ -403,7 +460,7 @@ def _table_add_legends(
                 just=("left", "centre"),
                 gp=Gpar(
                     fontsize=title_size,
-                    col=ltitle_el["colour"],
+                    col=_ltitle_colour,
                     fontface="bold",
                 ),
                 name=f"colourbar.title.{entry['title']}",
@@ -421,7 +478,7 @@ def _table_add_legends(
             cb_labels = build_colourbar_labels(
                 entry["breaks"], entry["labels"], limits,
                 direction="vertical",
-                label_size=label_size, label_colour=ltext_el["colour"],
+                label_size=label_size, label_colour=_ltext_colour,
             )
 
             # Build tick marks
@@ -430,8 +487,7 @@ def _table_add_legends(
             )
 
             # Estimate label width
-            max_lab_len = max((len(str(l)) for l in entry["labels"]), default=3)
-            label_w_cm = max(max_lab_len * 0.18, 0.5)
+            label_w_cm = _legend_label_width_cm(entry["labels"], label_size)
 
             # Assemble
             legend_gt = assemble_colourbar(
@@ -441,8 +497,8 @@ def _table_add_legends(
                 label_grobs=cb_labels,
                 title_grob=title_grob,
                 direction="vertical",
-                bar_width_cm=0.5,
-                bar_height_cm=3.0,
+                bar_width_cm=KEY_W_CM,
+                bar_height_cm=KEY_H_CM * 5,
                 label_width_cm=label_w_cm,
                 padding_cm=PADDING_CM,
                 bg_colour="white",
@@ -460,7 +516,7 @@ def _table_add_legends(
         )
 
         label_grobs = build_legend_labels(
-            entry, label_size=label_size, label_colour=ltext_el["colour"],
+            entry, label_size=label_size, label_colour=_ltext_colour,
         )
 
         sizes = measure_legend_grobs(
@@ -469,6 +525,7 @@ def _table_add_legends(
             key_width_cm=KEY_W_CM, key_height_cm=KEY_H_CM,
             spacing_x=SPACING_X_CM, spacing_y=SPACING_Y_CM,
             text_position="right",
+            label_size=label_size,
         )
 
         layout = arrange_legend_layout(
@@ -476,16 +533,15 @@ def _table_add_legends(
             text_position="right",
         )
 
-        title_grob = text_grob(
-            label=entry["title"],
-            x=0.0, y=0.5,
-            just=("left", "centre"),
-            gp=Gpar(
-                fontsize=title_size,
-                col=ltitle_el["colour"],
-                fontface="bold",
-            ),
-            name=f"legend.title.{entry['title']}",
+        # R (guide-legend.R): title is rendered via element_render so
+        # grobHeight(title) includes the legend.title element's margin.
+        # Using a bare text_grob here shrinks the cell below the
+        # glyph box and clips the top of the text (e.g. "drv" cap).
+        from ggplot2_py.theme_elements import element_render as _el_render
+        title_grob = _el_render(
+            theme, "legend.title",
+            label=str(entry["title"]),
+            margin_x=True, margin_y=True,
         )
 
         legend_gt = assemble_legend(
@@ -504,7 +560,8 @@ def _table_add_legends(
     # 6. Package multiple legends into a guide-box
     # ------------------------------------------------------------------
     guide_box = package_legend_box(
-        legend_gtables, position="right", spacing_cm=0.2,
+        legend_gtables, position="right",
+        spacing_cm=legend_spacing,
     )
 
     # ------------------------------------------------------------------
@@ -519,8 +576,7 @@ def _table_add_legends(
     # R: place <- find_panel(table); t=place$t, b=place$b  (plot-render.R:96-104)
     place = find_panel(table)
 
-    LEGEND_SPACING_CM = 0.2
-    table = gtable_add_cols(table, unit([LEGEND_SPACING_CM], "cm"), pos=-1)
+    table = gtable_add_cols(table, unit([legend_spacing], "cm"), pos=-1)
     table = gtable_add_cols(table, unit([guide_w_cm], "cm"), pos=-1)
     ncol_t = len(table._widths)
     table = gtable_add_grob(
@@ -534,8 +590,11 @@ def _table_add_legends(
 def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
     """Add title, subtitle, caption annotations to the plot table.
 
-    Mirrors R's plot assembly in ``ggplot_gtable.R``: title and subtitle
-    are added as rows at the top, caption at the bottom.
+    Mirrors R's ``table_add_titles()`` / ``table_add_caption()`` in
+    ``plot-render.R`` (lines 147-224):
+      1. Render the text via ``element_render(theme, element_name, label, ...)``
+      2. Measure actual rendered height via ``grob_height(grob)``
+      3. Add a row of that measured height to the gtable
 
     Parameters
     ----------
@@ -552,63 +611,55 @@ def _table_add_titles(table: Any, labels: Dict[str, Any], theme: Any) -> Any:
         Modified table.
     """
     from gtable_py import gtable_add_grob, gtable_add_rows
-    from grid_py import Unit as unit, text_grob, Gpar
-    from ggplot2_py.coord import _resolve_element
+    from grid_py import grob_height
+    from ggplot2_py.theme_elements import element_render, calc_element
 
     if not hasattr(table, "_widths"):
         return table
 
     ncol = len(table._widths)
 
-    # --- Caption (bottom) ---
+    # --- Caption (bottom) --- (R: plot-render.R:193-224)
     caption = labels.get("caption")
     if caption:
-        el = _resolve_element("plot.caption", theme,
-            {"colour": "grey30", "size": 7, "hjust": 1.0})
-        table = gtable_add_rows(table, unit([0.35], "cm"), pos=-1)
+        caption_grob = element_render(
+            theme, "plot.caption", label=str(caption),
+            margin_y=True, margin_x=True,
+        )
+        caption_height = grob_height(caption_grob)
+        table = gtable_add_rows(table, caption_height, pos=-1)
         nrow = len(table._heights)
         table = gtable_add_grob(
-            table,
-            text_grob(
-                label=str(caption), x=float(el.get("hjust", 0.95)), y=0.5,
-                just="right",
-                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
-                name="caption",
-            ),
+            table, caption_grob,
             t=nrow, l=1, r=ncol, clip="off", name="caption",
         )
 
     # --- Subtitle (top, added first so title goes above) ---
+    # (R: plot-render.R:157-161, 182-184)
     subtitle = labels.get("subtitle")
     if subtitle:
-        el = _resolve_element("plot.subtitle", theme,
-            {"colour": "grey30", "size": 8, "hjust": 0.5})
-        table = gtable_add_rows(table, unit([0.35], "cm"), pos=0)
+        subtitle_grob = element_render(
+            theme, "plot.subtitle", label=str(subtitle),
+            margin_y=True, margin_x=True,
+        )
+        subtitle_height = grob_height(subtitle_grob)
+        table = gtable_add_rows(table, subtitle_height, pos=0)
         table = gtable_add_grob(
-            table,
-            text_grob(
-                label=str(subtitle), x=float(el.get("hjust", 0.5)), y=0.5,
-                just="centre",
-                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
-                name="subtitle",
-            ),
+            table, subtitle_grob,
             t=1, l=1, r=ncol, clip="off", name="subtitle",
         )
 
-    # --- Title (top) ---
+    # --- Title (top) --- (R: plot-render.R:150-154, 186-188)
     title = labels.get("title")
     if title:
-        el = _resolve_element("plot.title", theme,
-            {"colour": "black", "size": 11, "hjust": 0.5})
-        table = gtable_add_rows(table, unit([0.5], "cm"), pos=0)
+        title_grob = element_render(
+            theme, "plot.title", label=str(title),
+            margin_y=True, margin_x=True,
+        )
+        title_height = grob_height(title_grob)
+        table = gtable_add_rows(table, title_height, pos=0)
         table = gtable_add_grob(
-            table,
-            text_grob(
-                label=str(title), x=float(el.get("hjust", 0.5)), y=0.5,
-                just="centre",
-                gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
-                name="title",
-            ),
+            table, title_grob,
             t=1, l=1, r=ncol, clip="off", name="title",
         )
 

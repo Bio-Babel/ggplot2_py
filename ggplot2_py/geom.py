@@ -166,6 +166,140 @@ __all__ = [
 
 
 # ===========================================================================
+# from_theme — theme-aware default aesthetics (R: properties.R / aes-delayed-eval.R)
+# ===========================================================================
+
+class FromTheme:
+    """Marker for a default aesthetic that should be resolved from the theme.
+
+    R's ``from_theme()`` records an expression over the
+    ``element_geom`` properties and re-evaluates it at draw time,
+    e.g. ``from_theme(fill %||% col_mix(ink, paper, 0.35))``.
+
+    Python equivalents::
+
+        FromTheme("pointsize")                 # R: from_theme(pointsize)
+        FromTheme("colour", fallback="ink")   # R: from_theme(colour %||% ink)
+        FromTheme("fill", fallback=lambda g: col_mix(g.ink, g.paper, 0.35))
+
+    Any callable passed as ``fallback`` receives the resolved
+    ``element_geom`` and must return the final value.  ``%||%``
+    semantics apply — the fallback is only used when the primary
+    property is ``None``.
+    """
+
+    __slots__ = ("_prop", "_fallback")
+
+    def __init__(self, prop: str, fallback: Any = None):
+        self._prop = prop
+        # fallback: None | str | callable(element_geom) -> value
+        self._fallback = fallback
+
+    def resolve(self, geom_el: Any) -> Any:
+        """Evaluate against an ``element_geom``.
+
+        R semantics: ``x %||% y`` uses ``y`` only if ``x`` is ``NULL``.
+        When ``prop`` is a callable, it is invoked with the
+        ``element_geom`` directly — used for expressions that are not
+        plain property lookups, e.g. ``from_theme(2 * linewidth)``
+        (geom-smooth.R:55).
+        """
+        if callable(self._prop):
+            return self._prop(geom_el)
+        val = getattr(geom_el, self._prop, None)
+        if val is not None:
+            return val
+        fb = self._fallback
+        if fb is None:
+            return None
+        if callable(fb):
+            return fb(geom_el)
+        # String-name fallback: another property on the element_geom
+        return getattr(geom_el, fb, None)
+
+    def __repr__(self) -> str:
+        return f"FromTheme({self._prop!r})"
+
+
+# Default element_geom properties (R: theme-elements.R:356-363
+# `.default_geom_element`).  These are the *exact* values hardcoded
+# in R; we match them verbatim.
+_DEFAULT_GEOM_PROPS = {
+    "ink": "black",
+    "paper": "white",
+    "accent": "#3366FF",
+    "linewidth": 0.5,
+    "borderwidth": 0.5,
+    "linetype": 1,
+    "bordertype": 1,
+    "family": "",
+    "fontsize": 11,
+    "pointsize": 1.5,
+    "pointshape": 19,
+    "fill": None,
+    "colour": None,
+}
+
+
+class _DefaultGeomElement:
+    """Fallback geom element when theme has no ``"geom"`` entry.
+
+    Mirrors R's ``.default_geom_element`` (theme-elements.R:356-363).
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        if name in _DEFAULT_GEOM_PROPS:
+            return _DEFAULT_GEOM_PROPS[name]
+        raise AttributeError(name)
+
+
+def _eval_from_theme(default_aes: "Mapping", theme: Any) -> "Mapping":
+    """Resolve any ``FromTheme`` markers in *default_aes* using *theme*.
+
+    Mirrors R's ``eval_from_theme()`` (geom-.R:471-498).  Falls back
+    to ``_DefaultGeomElement`` when ``theme$geom`` is absent — matching
+    R which uses ``.default_geom_element`` in that case.
+    """
+    has_themed = any(isinstance(v, FromTheme) for v in default_aes.values())
+    if not has_themed:
+        return default_aes
+
+    # Get the geom element from theme, else fall back to R's default
+    from ggplot2_py.theme_elements import calc_element, ElementGeom
+    theme_geom_el = None
+    if theme is not None:
+        theme_geom_el = calc_element("geom", theme)
+    # calc_element may return a partially-populated ElementGeom (user
+    # only set some props).  Wrap it with defaults for missing props.
+    default_el = _DefaultGeomElement()
+    if theme_geom_el is None:
+        geom_el = default_el
+    elif isinstance(theme_geom_el, ElementGeom):
+        # Proxy: read from theme first, then .default_geom_element.
+        # Capturing ``theme_geom_el`` (not ``geom_el``) avoids the
+        # re-assignment masking the closure cell and recursing.
+        _src = theme_geom_el
+        _defaults = default_el
+        class _MergedGeomElement:
+            def __getattr__(self, name):
+                v = getattr(_src, name, None)
+                if v is not None:
+                    return v
+                return getattr(_defaults, name)
+        geom_el = _MergedGeomElement()
+    else:
+        geom_el = theme_geom_el
+
+    resolved = {}
+    for key, val in default_aes.items():
+        if isinstance(val, FromTheme):
+            resolved[key] = val.resolve(geom_el)
+        else:
+            resolved[key] = val
+    return Mapping(**resolved)
+
+
+# ===========================================================================
 # Graphical-unit constants
 # ===========================================================================
 
@@ -423,6 +557,9 @@ class Geom(GGProto):
         if default_aes is None:
             default_aes = self.default_aes
 
+        # Resolve FromTheme markers using the theme (R: eval_from_theme)
+        default_aes = _eval_from_theme(default_aes, theme)
+
         # Inherit size as linewidth when applicable
         if self.rename_size:
             if data is not None and "linewidth" not in data.columns and "size" in data.columns:
@@ -634,13 +771,16 @@ class GeomPoint(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     non_missing_aes: Tuple[str, ...] = ("size", "shape", "colour")
+    # R: aes(shape=from_theme(pointshape), colour=from_theme(colour %||% ink),
+    #        fill=from_theme(fill %||% NA), size=from_theme(pointsize),
+    #        alpha=NA, stroke=from_theme(borderwidth))
     default_aes: Mapping = Mapping(
-        shape=19,
-        colour="black",
-        fill=None,
-        size=1.5,
+        shape=FromTheme("pointshape"),
+        colour=FromTheme("colour", fallback="ink"),
+        fill=FromTheme("fill"),
+        size=FromTheme("pointsize"),
         alpha=None,
-        stroke=0.5,
+        stroke=FromTheme("borderwidth"),
     )
     draw_key = draw_key_point
 
@@ -670,6 +810,11 @@ class GeomPoint(Geom):
             data["shape"] = data["shape"].apply(translate_shape_string)
         coords = _coord_transform(coord, data, panel_params)
 
+        # R (utilities-grid.R:35-43 gg_par):
+        #   args$lwd      = stroke * .stroke / 2
+        #   args$fontsize = pointsize * .pt + stroke * .stroke / 2
+        size_arr = coords["size"].values if "size" in coords.columns else 1.5
+        stroke_arr = coords["stroke"].values if "stroke" in coords.columns else 0.5
         return _ggname(
             "geom_point",
             points_grob(
@@ -685,16 +830,8 @@ class GeomPoint(Geom):
                         coords["fill"].values if "fill" in coords.columns else None,
                         coords["alpha"].values if "alpha" in coords.columns else None,
                     ),
-                    fontsize=(
-                        coords["size"].values * PT + coords["stroke"].values * STROKE
-                        if "size" in coords.columns and "stroke" in coords.columns
-                        else 1.5 * PT + 0.5 * STROKE
-                    ),
-                    lwd=(
-                        coords["stroke"].values * STROKE
-                        if "stroke" in coords.columns
-                        else 0.5 * STROKE
-                    ),
+                    fontsize=size_arr * PT + stroke_arr * STROKE / 2,
+                    lwd=stroke_arr * STROKE / 2,
                 ),
             ),
         )
@@ -709,10 +846,12 @@ class GeomPath(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     non_missing_aes: Tuple[str, ...] = ("linewidth", "colour", "linetype")
+    # R: aes(colour=from_theme(colour %||% ink), linewidth=from_theme(linewidth),
+    #        linetype=from_theme(linetype), alpha=NA)
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_path
@@ -875,15 +1014,32 @@ def _stairstep(data: pd.DataFrame, direction: str = "hv") -> pd.DataFrame:
 # GeomRect / GeomTile / GeomRaster
 # ===========================================================================
 
+def _mix_ink_paper(ratio: float):
+    """Build a fallback callable that computes ``col_mix(ink, paper, ratio)``.
+
+    Mirrors R's inline expressions such as ``col_mix(ink, paper, 0.35)``
+    used in geom default aesthetics (geom-rect.R, geom-ribbon.R, etc.).
+    """
+    from scales import col_mix as _cm
+    def _fn(g):
+        return _cm(g.ink, g.paper, ratio)
+    return _fn
+
+
 class GeomRect(Geom):
     """Rectangle geom (defined by xmin, xmax, ymin, ymax)."""
 
     required_aes: Tuple[str, ...] = ("xmin", "xmax", "ymin", "ymax")
+    # R (geom-rect.R:6-11):
+    #   colour    = from_theme(colour %||% NA),
+    #   fill      = from_theme(fill %||% col_mix(ink, paper, 0.35)),
+    #   linewidth = from_theme(borderwidth),
+    #   linetype  = from_theme(bordertype),
     default_aes: Mapping = Mapping(
-        colour=None,
-        fill="grey35",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour"),
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.35)),
+        linewidth=FromTheme("borderwidth"),
+        linetype=FromTheme("bordertype"),
         alpha=None,
     )
     draw_key = draw_key_polygon
@@ -959,11 +1115,15 @@ class GeomTile(GeomRect):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     non_missing_aes: Tuple[str, ...] = ("xmin", "xmax", "ymin", "ymax")
+    # R (geom-tile.R:26-35):
+    #   fill      = from_theme(fill %||% col_mix(ink, paper, 0.2)),
+    #   colour    = from_theme(colour %||% NA),
+    #   linewidth = from_theme(linewidth), linetype = from_theme(linetype)
     default_aes: Mapping = Mapping(
-        fill="grey35",
-        colour=None,
-        linewidth=0.1,
-        linetype=1,
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.2)),
+        colour=FromTheme("colour"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
         width=1,
         height=1,
@@ -1047,11 +1207,13 @@ class GeomBar(GeomRect):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     non_missing_aes: Tuple[str, ...] = ("xmin", "xmax", "ymin", "ymax")
+    # R (geom-bar.R:15):
+    #   default_aes = aes(!!!GeomRect$default_aes, width = 0.9)
     default_aes: Mapping = Mapping(
-        colour=None,
-        fill="grey35",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour"),
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.35)),
+        linewidth=FromTheme("borderwidth"),
+        linetype=FromTheme("bordertype"),
         alpha=None,
         width=0.9,
     )
@@ -1091,9 +1253,9 @@ class GeomText(Geom):
     required_aes: Tuple[str, ...] = ("x", "y", "label")
     non_missing_aes: Tuple[str, ...] = ("angle",)
     default_aes: Mapping = Mapping(
-        colour="black",
+        colour=FromTheme("colour", fallback="ink"),
         family="",
-        size=3.88,
+        size=FromTheme("fontsize"),
         angle=0,
         hjust=0.5,
         vjust=0.5,
@@ -1163,18 +1325,18 @@ class GeomLabel(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y", "label")
     default_aes: Mapping = Mapping(
-        colour="black",
+        colour=FromTheme("colour", fallback="ink"),
         fill="white",
         family="",
-        size=3.88,
+        size=FromTheme("fontsize"),
         angle=0,
         hjust=0.5,
         vjust=0.5,
         alpha=None,
         fontface=1,
         lineheight=1.2,
-        linewidth=0.25,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
     )
     draw_key = draw_key_label
 
@@ -1235,11 +1397,13 @@ class GeomPolygon(Geom):
     """Polygon geom."""
 
     required_aes: Tuple[str, ...] = ("x", "y")
+    # R (geom-polygon.R:73-80):
+    #   fill = from_theme(fill %||% col_mix(ink, paper, 0.2))
     default_aes: Mapping = Mapping(
-        colour=None,
-        fill="grey35",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour"),
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.2)),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_polygon
@@ -1304,11 +1468,13 @@ class GeomRibbon(Geom):
     """Ribbon geom -- shaded region between ymin and ymax."""
 
     required_aes: Tuple[str, ...] = ("x", "ymin", "ymax")
+    # R (geom-ribbon.R:6-13):
+    #   fill = from_theme(fill %||% col_mix(ink, paper, 0.2))
     default_aes: Mapping = Mapping(
-        colour=None,
-        fill="grey35",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour"),
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.2)),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     extra_params: Tuple[str, ...] = ("na_rm", "orientation")
@@ -1380,6 +1546,14 @@ class GeomRibbon(Geom):
         if outline_type == "full":
             return _ggname("geom_ribbon", g_poly)
 
+        # R (geom-ribbon.R:187-198): polylineGrob with col=aes$colour.
+        # When colour is NA (Python ``None``), R's gpar produces no
+        # stroke — we must skip the outline grobs entirely, otherwise
+        # Python's grid default fills in black (manifesting as the
+        # double-line artifact on geom_smooth's confidence ribbon).
+        if colour_val is None:
+            return _ggname("geom_ribbon", g_poly)
+
         # Draw outline lines
         upper_coords = _coord_transform(coord, pd.DataFrame({"x": data["x"].values, "y": data["ymax"].values}), panel_params)
         lower_coords = _coord_transform(coord, pd.DataFrame({"x": data["x"].values[::-1], "y": data["ymin"].values[::-1]}), panel_params)
@@ -1429,11 +1603,16 @@ class GeomSmooth(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     optional_aes: Tuple[str, ...] = ("ymin", "ymax")
+    # R (geom-smooth.R:52-58):
+    #   colour    = from_theme(colour %||% accent),
+    #   fill      = from_theme(fill %||% col_mix(ink, paper, 0.6)),
+    #   linewidth = from_theme(2 * linewidth),
+    #   linetype  = from_theme(linetype), weight = 1, alpha = 0.4
     default_aes: Mapping = Mapping(
-        colour="blue",
-        fill="grey60",
-        linewidth=1.0,
-        linetype=1,
+        colour=FromTheme("colour", fallback="accent"),
+        fill=FromTheme("fill", fallback=_mix_ink_paper(0.6)),
+        linewidth=FromTheme(lambda g: 2.0 * g.linewidth),
+        linetype=FromTheme("linetype"),
         weight=1,
         alpha=0.4,
     )
@@ -1498,9 +1677,9 @@ class GeomSegment(Geom):
     required_aes: Tuple[str, ...] = ("x", "y", "xend", "yend")
     non_missing_aes: Tuple[str, ...] = ("linetype", "linewidth")
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_path
@@ -1628,9 +1807,9 @@ class GeomErrorbar(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "ymin", "ymax")
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         width=0.9,
         alpha=None,
     )
@@ -1711,10 +1890,10 @@ class GeomCrossbar(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y", "ymin", "ymax")
     default_aes: Mapping = Mapping(
-        colour="black",
-        fill=None,
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        fill=FromTheme("fill"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     extra_params: Tuple[str, ...] = ("na_rm", "orientation")
@@ -1804,9 +1983,9 @@ class GeomLinerange(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "ymin", "ymax")
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     extra_params: Tuple[str, ...] = ("na_rm", "orientation")
@@ -1850,14 +2029,14 @@ class GeomPointrange(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y", "ymin", "ymax")
     default_aes: Mapping = Mapping(
-        colour="black",
+        colour=FromTheme("colour", fallback="ink"),
         size=0.5,
-        linewidth=0.5,
-        linetype=1,
-        shape=19,
-        fill=None,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
+        shape=FromTheme("pointshape"),
+        fill=FromTheme("fill"),
         alpha=None,
-        stroke=0.5,
+        stroke=FromTheme("borderwidth"),
     )
     extra_params: Tuple[str, ...] = ("na_rm", "orientation")
     draw_key = draw_key_pointrange
@@ -1905,11 +2084,11 @@ class GeomBoxplot(Geom):
         weight=1,
         colour="grey20",
         fill="white",
-        size=1.5,
+        size=FromTheme("pointsize"),
         alpha=None,
-        shape=19,
-        linetype=1,
-        linewidth=0.5,
+        shape=FromTheme("pointshape"),
+        linetype=FromTheme("linetype"),
+        linewidth=FromTheme("linewidth"),
         width=0.9,
     )
     extra_params: Tuple[str, ...] = ("na_rm", "orientation", "outliers")
@@ -2060,8 +2239,8 @@ class GeomViolin(Geom):
         weight=1,
         colour="grey20",
         fill="white",
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
         width=0.9,
     )
@@ -2138,11 +2317,11 @@ class GeomDotplot(Geom):
     required_aes: Tuple[str, ...] = ("x", "y")
     non_missing_aes: Tuple[str, ...] = ("size", "shape")
     default_aes: Mapping = Mapping(
-        colour="black",
+        colour=FromTheme("colour", fallback="ink"),
         fill="black",
         alpha=None,
         stroke=1.0,
-        linetype=1,
+        linetype=FromTheme("linetype"),
         weight=1,
         width=0.9,
     )
@@ -2192,12 +2371,12 @@ class GeomDensity(GeomArea):
     """Density geom -- smoothed histogram."""
 
     default_aes: Mapping = Mapping(
-        colour="black",
-        fill=None,
+        colour=FromTheme("colour", fallback="ink"),
+        fill=FromTheme("fill"),
         weight=1,
         alpha=None,
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
     )
 
 
@@ -2221,9 +2400,9 @@ class GeomAbline(Geom):
 
     required_aes: Tuple[str, ...] = ("slope", "intercept")
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_abline
@@ -2260,9 +2439,9 @@ class GeomHline(Geom):
 
     required_aes: Tuple[str, ...] = ("yintercept",)
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_path
@@ -2297,9 +2476,9 @@ class GeomVline(Geom):
 
     required_aes: Tuple[str, ...] = ("xintercept",)
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_vline
@@ -2338,9 +2517,9 @@ class GeomRug(Geom):
 
     optional_aes: Tuple[str, ...] = ("x", "y")
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_path
@@ -2445,8 +2624,8 @@ class GeomContour(GeomPath):
     default_aes: Mapping = Mapping(
         weight=1,
         colour="blue",
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
 
@@ -2465,8 +2644,8 @@ class GeomDensity2d(GeomPath):
 
     default_aes: Mapping = Mapping(
         colour="blue",
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
 
@@ -2485,10 +2664,10 @@ class GeomHex(Geom):
 
     required_aes: Tuple[str, ...] = ("x", "y")
     default_aes: Mapping = Mapping(
-        colour=None,
+        colour=FromTheme("colour"),
         fill="grey50",
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
     draw_key = draw_key_polygon
@@ -2680,8 +2859,8 @@ class GeomQuantile(GeomPath):
     default_aes: Mapping = Mapping(
         weight=1,
         colour="blue",
-        linewidth=0.5,
-        linetype=1,
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=None,
     )
 
@@ -2838,13 +3017,13 @@ class GeomSf(Geom):
     required_aes: Tuple[str, ...] = ("geometry",)
     default_aes: Mapping = Mapping(
         shape=None,
-        colour=None,
-        fill=None,
+        colour=FromTheme("colour"),
+        fill=FromTheme("fill"),
         size=None,
         linewidth=None,
         linetype=None,
         alpha=None,
-        stroke=0.5,
+        stroke=FromTheme("borderwidth"),
     )
 
     def draw_panel(
@@ -3016,9 +3195,9 @@ class GeomLogticks(Geom):
     """
 
     default_aes: Mapping = Mapping(
-        colour="black",
-        linewidth=0.5,
-        linetype=1,
+        colour=FromTheme("colour", fallback="ink"),
+        linewidth=FromTheme("linewidth"),
+        linetype=FromTheme("linetype"),
         alpha=1.0,
     )
 

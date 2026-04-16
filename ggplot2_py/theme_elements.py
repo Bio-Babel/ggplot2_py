@@ -20,6 +20,7 @@ from grid_py import (
     GTree,
     rect_grob,
     lines_grob,
+    polyline_grob,
     text_grob,
     polygon_grob,
     null_grob,
@@ -66,6 +67,17 @@ __all__ = [
     "register_theme_elements",
     "reset_theme_settings",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Graphical-unit conversion constants (R: ggplot2/R/geom-.R, lines 513-517)
+# ---------------------------------------------------------------------------
+# Multiply a size in mm by these to convert to the units that grid uses
+# internally for ``lwd`` and ``fontsize``.
+#   .pt    = 72.27 / 25.4  — mm → points (for lwd & fontsize)
+#   .stroke = 96 / 25.4    — mm → stroke units (for point border widths)
+_PT: float = 72.27 / 25.4
+_STROKE: float = 96 / 25.4
 
 
 # ---------------------------------------------------------------------------
@@ -1318,11 +1330,16 @@ def _grob_from_rect(
     linetype: Optional[Union[int, str]] = None,
     **kwargs: Any,
 ) -> Any:
-    """Render an ``ElementRect`` as a rect grob."""
+    """Render an ``ElementRect`` as a rect grob.
+
+    Mirrors R's ``element_grob(element_rect, ...)`` which converts
+    linewidth (mm) → lwd (points) via ``gg_par(lwd = linewidth)``.
+    """
+    lwd_mm = linewidth if linewidth is not None else element.linewidth
     gp = Gpar(
         fill=fill if fill is not None else element.fill,
         col=colour if colour is not None else element.colour,
-        lwd=linewidth if linewidth is not None else element.linewidth,
+        lwd=float(lwd_mm) * _PT if lwd_mm is not None else None,
         lty=linetype if linetype is not None else element.linetype,
     )
     return rect_grob(x=x, y=y, width=width, height=height, gp=gp, **kwargs)
@@ -1336,20 +1353,89 @@ def _grob_from_line(
     linewidth: Optional[float] = None,
     linetype: Optional[Union[int, str]] = None,
     lineend: Optional[str] = None,
+    id: Optional[Any] = None,
+    id_lengths: Optional[Any] = None,
+    default_units: str = "npc",
     **kwargs: Any,
 ) -> Any:
-    """Render an ``ElementLine`` as a lines grob."""
+    """Render an ``ElementLine`` as a polyline grob.
+
+    Mirrors R's ``element_grob.element_line`` (theme-elements.R:558-595):
+    always emits a ``polylineGrob`` (accepts ``id.lengths`` for
+    multi-segment lines — used for panel gridlines); converts
+    ``linewidth`` (mm) → ``lwd`` (points) via ``gg_par(lwd = linewidth)``.
+    """
     if x is None:
         x = [0, 1]
     if y is None:
         y = [0, 1]
+    lwd_mm = linewidth if linewidth is not None else element.linewidth
     gp = Gpar(
         col=colour if colour is not None else element.colour,
-        lwd=linewidth if linewidth is not None else element.linewidth,
+        lwd=float(lwd_mm) * _PT if lwd_mm is not None else None,
         lty=linetype if linetype is not None else element.linetype,
         lineend=lineend if lineend is not None else element.lineend,
     )
-    return lines_grob(x=x, y=y, gp=gp, **kwargs)
+    return polyline_grob(
+        x=x, y=y,
+        id=id, id_lengths=id_lengths,
+        default_units=default_units,
+        gp=gp, **kwargs,
+    )
+
+
+def _rotate_just(angle: float, hjust: float, vjust: float) -> Tuple[float, float]:
+    """Rotate (hjust, vjust) counter-clockwise into the rotated text frame.
+
+    Mirrors R's ``rotate_just()`` (margins.R:216-276).  Used by
+    ``titleGrob`` to compute default x/y anchors so rotated text
+    sits at the correct point within its parent viewport.
+    """
+    import bisect
+    a = (float(angle) if angle is not None else 0.0) % 360
+    hj = 0.5 if hjust is None else float(hjust)
+    vj = 0.5 if vjust is None else float(vjust)
+    # R: case <- findInterval(angle, c(0, 90, 180, 270, 360))
+    # findInterval is right-open: case=1 for [0,90), 2 for [90,180), etc.
+    case = bisect.bisect_right([0.0, 90.0, 180.0, 270.0, 360.0], a)
+    if case == 2:          # 90 <= a < 180
+        return (1 - vj, hj)
+    if case == 3:          # 180 <= a < 270
+        return (1 - hj, 1 - vj)
+    if case == 4:          # 270 <= a < 360
+        return (vj, 1 - hj)
+    return (hj, vj)        # 0 <= a < 90
+
+
+class _TitleGrob(GTree):
+    """A text grob wrapped with its margin — simplified port of R's titleGrob.
+
+    When ``margin_x`` or ``margin_y`` is ``True``, the grob carries
+    ``_widths`` and ``_heights`` vectors that include the surrounding
+    margin, so ``grob_height()`` / ``grob_width()`` return the full
+    extent including padding.
+
+    R reference: ``ggplot2/R/margins.R`` lines 88-206.
+    """
+
+    def __init__(self, text_grob_child: Any, widths: Any, heights: Any,
+                 name: str = "title") -> None:
+        from grid_py import GList
+        super().__init__(children=GList(text_grob_child), name=name)
+        self._title_widths = widths
+        self._title_heights = heights
+
+    # R: widthDetails.titleGrob  → sum(x$widths)
+    def width_details(self) -> Any:
+        if self._title_widths is not None:
+            return sum(self._title_widths)
+        return Unit(0, "cm")
+
+    # R: heightDetails.titleGrob → sum(x$heights)
+    def height_details(self) -> Any:
+        if self._title_heights is not None:
+            return sum(self._title_heights)
+        return Unit(0, "cm")
 
 
 def _grob_from_text(
@@ -1365,9 +1451,17 @@ def _grob_from_text(
     vjust: Optional[float] = None,
     angle: Optional[float] = None,
     lineheight: Optional[float] = None,
+    margin: Any = None,
+    margin_x: bool = False,
+    margin_y: bool = False,
     **kwargs: Any,
 ) -> Any:
-    """Render an ``ElementText`` as a text grob."""
+    """Render an ``ElementText`` as a text grob.
+
+    When *margin_x* or *margin_y* is ``True``, wraps the result in a
+    ``_TitleGrob`` whose ``width_details``/``height_details`` include
+    the element's margin — matching R's ``titleGrob()`` (margins.R:88-206).
+    """
     if label is None:
         return null_grob()
     gp = Gpar(
@@ -1377,10 +1471,94 @@ def _grob_from_text(
         col=colour if colour is not None else element.colour,
         lineheight=lineheight if lineheight is not None else element.lineheight,
     )
-    hj = hjust if hjust is not None else element.hjust
-    vj = vjust if vjust is not None else element.vjust
-    ang = angle if angle is not None else element.angle
-    return text_grob(label=label, x=x, y=y, hjust=hj, vjust=vj, rot=ang, gp=gp, **kwargs)
+    hj = hjust if hjust is not None else (element.hjust if element.hjust is not None else 0.5)
+    vj = vjust if vjust is not None else (element.vjust if element.vjust is not None else 0.5)
+    ang = angle if angle is not None else (element.angle if element.angle is not None else 0)
+
+    # R titleGrob (margins.R:95-107): when x/y are NULL, default them to the
+    # ROTATED justification anchor inside the parent viewport.
+    just_hj, just_vj = _rotate_just(ang, hj, vj)
+    if x is None:
+        x = Unit(just_hj, "npc")
+    if y is None:
+        y = Unit(just_vj, "npc")
+
+    # If no margin wrapping requested, emit a plain text grob.
+    if not margin_x and not margin_y:
+        return text_grob(label=label, x=x, y=y, hjust=hj, vjust=vj, rot=ang,
+                         gp=gp, **kwargs)
+
+    # --- titleGrob (R: margins.R:88-196) ---------------------------------
+    # Resolve the element's margin (R: element_text has a `margin` slot).
+    el_margin = margin if margin is not None else getattr(element, "margin", None)
+    if el_margin is None:
+        m_t = m_r = m_b = m_l = Unit(0, "pt")
+    elif isinstance(el_margin, Margin):
+        m_t = Unit(el_margin.t, el_margin.unit_str)
+        m_r = Unit(el_margin.r, el_margin.unit_str)
+        m_b = Unit(el_margin.b, el_margin.unit_str)
+        m_l = Unit(el_margin.l, el_margin.unit_str)
+    else:
+        m_t = m_r = m_b = m_l = Unit(0, "pt")
+
+    # Shift x/y inward by margin before constructing the text grob
+    # (R: margins.R:150, 156):
+    #   new_x = x - margin[2] * just$hjust + margin[4] * (1 - just$hjust)
+    #   new_y = y - margin[1] * just$vjust + margin[3] * (1 - just$vjust)
+    # This is what creates the actual visual gap between the text and the
+    # edge of its cell.  Without it the margin only affects cell sizing.
+    if margin_x:
+        if just_hj != 0:
+            x = x - m_r * just_hj
+        if just_hj != 1:
+            x = x + m_l * (1 - just_hj)
+    if margin_y:
+        if just_vj != 0:
+            y = y - m_t * just_vj
+        if just_vj != 1:
+            y = y + m_b * (1 - just_vj)
+
+    grob = text_grob(label=label, x=x, y=y, hjust=hj, vjust=vj, rot=ang,
+                     gp=gp, **kwargs)
+
+    # --- Compute widths/heights for width_details/height_details ---------
+    # R emits *lazy* grobwidth/grobheight units referencing the rotated
+    # textGrob.  grid resolves them at draw time using the rotated
+    # bounding box (tested: grid_py handles this correctly).
+    #
+    # R: width  = unit(1, "grobwidth",  grob) + x_descent
+    # R: height = unit(1, "grobheight", grob) + y_descent
+    # where x_descent = abs(sin(rad)) * font_descent
+    #       y_descent = abs(cos(rad)) * font_descent
+    import math
+    from grid_py._size import calc_string_metric
+
+    fontsize_val = size if size is not None else (element.size if element.size is not None else 12)
+    # Use a canonical descender probe like R (margins.R:115-120: it replaces
+    # the label with descender letters to guarantee consistent height).
+    metrics = calc_string_metric("gjpqy", Gpar(
+        fontsize=fontsize_val,
+        fontfamily=family if family is not None else element.family,
+        fontface=face if face is not None else element.face,
+    ))
+    descent_in = metrics["descent"]
+
+    ang_val = float(ang) if ang is not None else 0.0
+    rad = math.radians(ang_val % 360)
+    x_descent_unit = Unit(abs(math.sin(rad)) * descent_in, "inches")
+    y_descent_unit = Unit(abs(math.cos(rad)) * descent_in, "inches")
+
+    width = grob_width(grob) + x_descent_unit
+    height = grob_height(grob) + y_descent_unit
+
+    # Build widths/heights vectors including margins.
+    # R: new_width  = unit.c(margin[4], width, margin[2])  # left, w, right
+    # R: new_height = unit.c(margin[1], height, margin[3]) # top, h, bottom
+    widths = unit_c(m_l, width, m_r) if margin_x else width
+    heights = unit_c(m_t, height, m_b) if margin_y else height
+
+    return _TitleGrob(grob, widths=widths, heights=heights,
+                      name=kwargs.get("name", "title"))
 
 
 def _grob_from_point(
@@ -1396,7 +1574,9 @@ def _grob_from_point(
 ) -> Any:
     """Render an ``ElementPoint`` as a points grob.
 
-    Mirrors R's ``element_grob(element_point, ...)``.
+    Mirrors R's ``element_grob(element_point, ...)`` which converts
+    pointsize (mm) and stroke (mm) via ``gg_par(pointsize=size, stroke=stroke)``:
+        fontsize = pointsize_mm * .pt + stroke_mm * .stroke / 2
     """
     from grid_py import points_grob, Gpar
     col = colour or element.colour or "black"
@@ -1404,11 +1584,12 @@ def _grob_from_point(
     fl = fill or element.fill
     sz = size if size is not None else (element.size if element.size is not None else 1.5)
     st = stroke if stroke is not None else (element.stroke if element.stroke is not None else 0.5)
-    gp = Gpar(col=col, fill=fl, fontsize=float(sz) * 2.83)  # size → pt approx
+    # R: gg_par(pointsize=sz, stroke=st) → fontsize = sz * .pt + st * .stroke / 2
+    fontsize = float(sz) * _PT + float(st) * _STROKE / 2
+    gp = Gpar(col=col, fill=fl, fontsize=fontsize)
     try:
         return points_grob(x=x, y=y, pch=int(sh), gp=gp, **kwargs)
     except Exception:
-        # points_grob may not exist; fallback to a circle_grob or null
         from grid_py import null_grob
         return null_grob()
 
@@ -1424,7 +1605,8 @@ def _grob_from_polygon(
 ) -> Any:
     """Render an ``ElementPolygon`` as a path grob.
 
-    Mirrors R's ``element_grob(element_polygon, ...)``.
+    Mirrors R's ``element_grob(element_polygon, ...)`` which converts
+    linewidth (mm) → lwd (points) via ``gg_par(lwd = linewidth)``.
     """
     from grid_py import polygon_grob, Gpar
     if x is None:
@@ -1433,9 +1615,9 @@ def _grob_from_polygon(
         y = [0.5, 1, 0.5, 0]
     fl = fill or element.fill or "grey20"
     col = colour or element.colour
-    lwd = linewidth if linewidth is not None else (element.linewidth if element.linewidth is not None else 0.5)
+    lwd_mm = linewidth if linewidth is not None else (element.linewidth if element.linewidth is not None else 0.5)
     lty = linetype if linetype is not None else (element.linetype if element.linetype is not None else 1)
-    gp = Gpar(fill=fl, col=col, lwd=float(lwd) * (96 / 72), lty=lty)
+    gp = Gpar(fill=fl, col=col, lwd=float(lwd_mm) * _PT, lty=lty)
     return polygon_grob(x=x, y=y, gp=gp, **kwargs)
 
 
@@ -1733,14 +1915,21 @@ def register_theme_elements(
 def reset_theme_settings(reset_current: bool = True) -> None:
     """Reset the element tree and default theme to built-in defaults.
 
+    Mirrors R's ``reset_theme_settings()`` (theme-elements.R:714-723):
+    restores the element tree, sets ``theme_default = theme_grey()``,
+    and (unless disabled) sets ``theme_current = theme_default``.
+
     Parameters
     ----------
     reset_current : bool
         If ``True`` (default), also reset the currently active theme.
     """
     _ggplot_global.element_tree = dict(_ELEMENT_TREE)
-    # The actual theme_default/theme_current reset is performed lazily
-    # by the theme module (to avoid circular imports at module load time).
+    # Local import: theme_defaults depends on this module (circular at top level).
+    from ggplot2_py.theme_defaults import theme_grey
+    _ggplot_global.theme_default = theme_grey()
+    if reset_current:
+        _ggplot_global.theme_current = _ggplot_global.theme_default
 
 
 # ---------------------------------------------------------------------------

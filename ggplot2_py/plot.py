@@ -230,12 +230,16 @@ class GGPlot:
     ) -> None:
         # Lazy imports to avoid circular dependencies
         from ggplot2_py.scale import ScalesList
+        from ggplot2_py.theme import Theme
 
         self.data = data
         self.mapping: Mapping = mapping if mapping is not None else aes()
         self.layers: List[Any] = []
         self.scales: "ScalesList" = ScalesList()
-        self.theme: Any = {}  # will be merged with defaults
+        # R: plot$theme starts as an empty theme() object — not a bare list.
+        # Must be a Theme instance so complete_theme() can access .complete
+        # and ggplot2_py.theme.add_theme() works via operator overloads.
+        self.theme: Theme = Theme()
         self.coordinates: Any = None  # filled lazily via default
         self.facet: Any = None  # filled lazily via default
         self.labels: Labels = Labels()
@@ -813,11 +817,11 @@ def _build_ggplot(plot):
     layout.setup_panel_guides(plot.guides, plot.layers)
 
     # --- Complete theme ---
-    if hasattr(plot, "theme"):
-        try:
-            plot.theme = complete_theme(plot.theme)
-        except Exception:
-            pass
+    # R: plot@theme <- plot_theme(plot)  (plot-build.R:107)
+    # No try/except: R lets theme errors surface; silently discarding them
+    # leaves ``plot.theme`` as an incomplete object and every downstream
+    # ``calc_element`` then returns ``None`` (no bg, no grid, no titles).
+    plot.theme = complete_theme(plot.theme)
 
     # --- Train non-position scales and guides ---
     npscales = scales.non_position_scales()

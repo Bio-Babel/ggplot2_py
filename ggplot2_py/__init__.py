@@ -832,6 +832,16 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
+# Initialize the global theme state — mirrors R's on_load block in
+# ``theme-elements.R:727-733`` which calls ``reset_theme_settings()`` to
+# establish ``theme_default = theme_grey()`` and ``theme_current`` before
+# any plot is built.  Without this, ``complete_theme`` cannot fall back
+# to a valid default, and all downstream ``calc_element`` resolutions
+# return ``None``.
+# ---------------------------------------------------------------------------
+reset_theme_settings()
+
+# ---------------------------------------------------------------------------
 # Entry-point plugin discovery — scan installed packages for extensions.
 # This runs once at import time. Extensions that fail to load emit a
 # warning but do not block import.

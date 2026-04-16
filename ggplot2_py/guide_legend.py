@@ -65,7 +65,28 @@ _DEFAULT_SPACING_Y_CM: float = 0.0     # legend.key.spacing.y (vertical: 0)
 _DEFAULT_PADDING_CM: float = 0.15      # legend.margin
 _DEFAULT_LABEL_SIZE: float = 6.0       # legend.text size (pt)
 _DEFAULT_TITLE_SIZE: float = 7.0       # legend.title size (pt)
-_CHAR_WIDTH_CM: float = 0.18           # approximate single-char width
+
+
+def _text_width_cm(text: str, fontsize: float = 10.0) -> float:
+    """Measure text width in cm using Cairo font metrics.
+
+    Replaces the old ``len(text) * 0.18`` character-count heuristic with
+    actual font measurement, matching R's ``width_cm(label_grob)`` pattern
+    (utilities-grid.R:67-77).
+    """
+    from grid_py._size import calc_string_metric
+    m = calc_string_metric(text, Gpar(fontsize=fontsize))
+    return m["width"] * 2.54  # inches → cm
+
+
+def _text_height_cm(text: str, fontsize: float = 10.0) -> float:
+    """Measure text height in cm using Cairo font metrics.
+
+    Matches R's ``height_cm(label_grob)`` pattern.
+    """
+    from grid_py._size import calc_string_metric
+    m = calc_string_metric(text, Gpar(fontsize=fontsize))
+    return (m["ascent"] + m["descent"]) * 2.54  # inches → cm
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +310,7 @@ def measure_legend_grobs(
     spacing_y: float = _DEFAULT_SPACING_Y_CM,
     text_position: str = "right",
     byrow: bool = False,
+    label_size: float = _DEFAULT_LABEL_SIZE,
 ) -> Dict[str, List[float]]:
     """Measure keys and labels, compute gtable widths/heights with spacing.
 
@@ -354,7 +376,7 @@ def measure_legend_grobs(
     key_widths = [max(kw_matrix[r][c] for r in range(nrow)) for c in range(ncol)]
     key_heights = [max(kh_matrix[r][c] for c in range(ncol)) for r in range(nrow)]
 
-    # Label sizes: estimate from text length
+    # Label sizes: measure with font metrics (R: width_cm(grobs$labels))
     label_w_per_entry = []
     for i, lab_grob in enumerate(labels):
         label_text = ""
@@ -362,7 +384,8 @@ def measure_legend_grobs(
             label_text = str(lab_grob.label)
         elif hasattr(lab_grob, "_label"):
             label_text = str(lab_grob._label)
-        label_w_per_entry.append(max(len(label_text) * _CHAR_WIDTH_CM, 0.3))
+        label_w_per_entry.append(_text_width_cm(label_text, fontsize=label_size)
+                                 if label_text else 0.3)
 
     # Pad label widths
     label_w_per_entry.extend([0.0] * pad)
@@ -611,38 +634,37 @@ def add_legend_title(
     if title_grob is None:
         return gt
 
-    # Estimate title dimensions
-    title_text = ""
-    if hasattr(title_grob, "label"):
-        title_text = str(title_grob.label)
-    elif hasattr(title_grob, "_label"):
-        title_text = str(title_grob._label)
-    title_width_cm = max(len(title_text) * _CHAR_WIDTH_CM * 1.1, 0.5)
-    title_height_cm = 0.4  # approximate single-line title height
+    # R (guide-.R:924-951): cell size = ``grobHeight(title)`` /
+    # ``grobWidth(title)``.  When ``title_grob`` is a ``_TitleGrob``
+    # (produced by ``element_render(legend.title)``), ``grob_height``
+    # returns a lazy unit covering text + margin, which grid_py
+    # resolves correctly at draw time.  For a bare text_grob without
+    # margins, ``grob_height`` still gives the glyph box.
+    from grid_py import grob_height as _gh, grob_width as _gw
 
     if position == "top":
-        gt = gtable_add_rows(gt, Unit(title_height_cm, "cm"), pos=0)
+        gt = gtable_add_rows(gt, _gh(title_grob), pos=0)
         gt = gtable_add_grob(
             gt, title_grob,
             t=1, l=1, r=gt.ncol, b=1,
             z=-math.inf, clip="off", name="title",
         )
     elif position == "bottom":
-        gt = gtable_add_rows(gt, Unit(title_height_cm, "cm"), pos=-1)
+        gt = gtable_add_rows(gt, _gh(title_grob), pos=-1)
         gt = gtable_add_grob(
             gt, title_grob,
             t=gt.nrow, l=1, r=gt.ncol, b=gt.nrow,
             z=-math.inf, clip="off", name="title",
         )
     elif position == "left":
-        gt = gtable_add_cols(gt, Unit(title_width_cm, "cm"), pos=0)
+        gt = gtable_add_cols(gt, _gw(title_grob), pos=0)
         gt = gtable_add_grob(
             gt, title_grob,
             t=1, l=1, r=1, b=gt.nrow,
             z=-math.inf, clip="off", name="title",
         )
     elif position == "right":
-        gt = gtable_add_cols(gt, Unit(title_width_cm, "cm"), pos=-1)
+        gt = gtable_add_cols(gt, _gw(title_grob), pos=-1)
         gt = gtable_add_grob(
             gt, title_grob,
             t=1, l=gt.ncol, r=gt.ncol, b=gt.nrow,

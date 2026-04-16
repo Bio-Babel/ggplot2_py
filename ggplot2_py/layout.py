@@ -677,21 +677,17 @@ class Layout(GGProto):
                 if val is None or is_waiver(val):
                     grobs.append(null_grob())
                 else:
-                    # Resolve via calc_element for full theme inheritance
-                    from ggplot2_py.coord import _resolve_element
+                    # R: element_render(theme, "axis.title.x.bottom", label=...,
+                    #    margin_x = label == "y", margin_y = label == "x")
+                    from ggplot2_py.theme_elements import element_render as _el_render
                     pos = ".bottom" if axis == "x" else ".left"
                     if i == 1:
                         pos = ".top" if axis == "x" else ".right"
-                    el = _resolve_element(
-                        f"axis.title.{axis}{pos}", theme,
-                        {"colour": "grey30", "size": 9, "angle": 90.0 if axis == "y" else 0.0},
-                    )
-                    g = text_grob(
-                        label=str(val), x=0.5, y=0.5,
-                        rot=float(el["angle"]),
-                        just="centre",
-                        gp=Gpar(fontsize=float(el["size"]), col=el["colour"]),
-                        name=f"axis.title.{axis}",
+                    g = _el_render(
+                        theme, f"axis.title.{axis}{pos}",
+                        label=str(val),
+                        margin_x=(axis == "y"),
+                        margin_y=(axis == "x"),
                     )
                     grobs.append(g)
             result[axis] = grobs

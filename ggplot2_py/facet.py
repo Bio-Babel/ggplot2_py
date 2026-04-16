@@ -29,6 +29,50 @@ def _is_null_grob(grob: Any) -> bool:
     name = getattr(grob, "_name", getattr(grob, "name", ""))
     return cls == "null" or "null" in str(name).lower() or "zero" in str(name).lower()
 
+
+def _axis_width_cm(ax: Any) -> float:
+    """Measure axis grob width in cm.
+
+    R measures axis width via ``gtable_width(gt)`` + ``convertUnit(..., "cm")``.
+    No fallback — if measurement fails, let it surface.
+    """
+    from gtable_py import Gtable, gtable_width
+    from grid_py import convert_width
+    if isinstance(ax, Gtable):
+        w = gtable_width(ax)
+        result = convert_width(w, "cm", valueOnly=True)
+        return float(np.sum(result))
+    # _AbsoluteAxisGrob path
+    val = getattr(ax, "_width_cm", None)
+    if val is not None:
+        return val
+    # width_details path
+    if hasattr(ax, "width_details"):
+        from ggplot2_py.guide_axis import _width_cm
+        return _width_cm(ax)
+    raise ValueError(f"Cannot measure width of {type(ax).__name__}")
+
+
+def _axis_height_cm(ax: Any) -> float:
+    """Measure axis grob height in cm.
+
+    R measures axis height via ``gtable_height(gt)`` + ``convertUnit(..., "cm")``.
+    No fallback — if measurement fails, let it surface.
+    """
+    from gtable_py import Gtable, gtable_height
+    from grid_py import convert_height
+    if isinstance(ax, Gtable):
+        h = gtable_height(ax)
+        result = convert_height(h, "cm", valueOnly=True)
+        return float(np.sum(result))
+    val = getattr(ax, "_height_cm", None)
+    if val is not None:
+        return val
+    if hasattr(ax, "height_details"):
+        from ggplot2_py.guide_axis import _height_cm
+        return _height_cm(ax)
+    raise ValueError(f"Cannot measure height of {type(ax).__name__}")
+
 __all__ = [
     "Facet",
     "FacetNull",
@@ -554,7 +598,7 @@ class Facet(GGProto):
 
         # ── Attach left axis (R: seam_table side="left")
         if left_axes:
-            max_w = max(getattr(ax, "_width_cm", 0.8) or 0.8 for _, ax in left_axes)
+            max_w = max(_axis_width_cm(ax) for _, ax in left_axes)
             gt = gtable_add_cols(gt, unit([max_w], "cm"), pos=0)
             col_offset = 1
             for r, ax in left_axes:
@@ -564,7 +608,7 @@ class Facet(GGProto):
 
         # ── Attach right axis (R: seam_table side="right")
         if right_axes:
-            max_w = max(getattr(ax, "_width_cm", 0.8) or 0.8 for _, ax in right_axes)
+            max_w = max(_axis_width_cm(ax) for _, ax in right_axes)
             gt = gtable_add_cols(gt, unit([max_w], "cm"), pos=-1)
             ncol_now = len(gt._widths)
             for r, ax in right_axes:
@@ -574,7 +618,7 @@ class Facet(GGProto):
 
         # ── Attach bottom axis (R: seam_table side="bottom")
         if bottom_axes:
-            max_h = max(getattr(ax, "_height_cm", 0.6) or 0.6 for _, ax in bottom_axes)
+            max_h = max(_axis_height_cm(ax) for _, ax in bottom_axes)
             gt = gtable_add_rows(gt, unit([max_h], "cm"), pos=-1)
             nrow_now = len(gt._heights)
             for c, ax in bottom_axes:
@@ -585,7 +629,7 @@ class Facet(GGProto):
 
         # ── Attach top axis (R: seam_table side="top")
         if top_axes:
-            max_h = max(getattr(ax, "_height_cm", 0.6) or 0.6 for _, ax in top_axes)
+            max_h = max(_axis_height_cm(ax) for _, ax in top_axes)
             gt = gtable_add_rows(gt, unit([max_h], "cm"), pos=0)
             for c, ax in top_axes:
                 gt = gtable_add_grob(
@@ -618,7 +662,14 @@ class Facet(GGProto):
         from gtable_py import gtable_add_grob, gtable_add_rows, gtable_add_cols
         from grid_py import Unit as unit, text_grob, Gpar, rect_grob
         from grid_py._grob import grob_tree, GList
-        from ggplot2_py.coord import _resolve_element
+        from ggplot2_py.theme_elements import calc_element as _calc_el
+
+        # R always has a complete theme at this point.  If Python's theme
+        # is None, fall back to theme_grey() to surface real bugs rather
+        # than None-attribute errors.
+        if theme is None:
+            from ggplot2_py.theme_defaults import theme_grey
+            theme = theme_grey()
 
         meta_cols = {"PANEL", "ROW", "COL", "SCALE_X", "SCALE_Y", "COORD"}
         facet_vars = [c for c in layout.columns if c not in meta_cols]
@@ -637,28 +688,70 @@ class Facet(GGProto):
         except (ValueError, TypeError):
             labeller_fn = label_value
 
-        # Resolve strip theme elements
-        strip_txt_x = _resolve_element("strip.text.x", theme,
-            {"colour": "grey10", "size": 8, "angle": 0})
-        strip_bg_x = _resolve_element("strip.background.x", theme,
-            {"fill": "grey85", "colour": None})
-        strip_txt_y = _resolve_element("strip.text.y", theme,
-            {"colour": "grey10", "size": 8, "angle": -90})
-        strip_bg_y = _resolve_element("strip.background.y", theme,
-            {"fill": "grey85", "colour": None})
+        # Resolve strip theme elements via calc_element (proper inheritance).
+        # R always has a complete theme with strip elements defined.
+        # If calc_element returns None, the element tree is incomplete
+        # — reset it and retry with a guaranteed-complete theme.
+        from ggplot2_py.theme_elements import ElementBlank as _EB
+        strip_txt_x_el = _calc_el("strip.text.x", theme)
+        if strip_txt_x_el is None:
+            from ggplot2_py.theme_elements import reset_theme_settings
+            reset_theme_settings()
+            from ggplot2_py.theme_defaults import theme_grey
+            theme = theme_grey()
+            strip_txt_x_el = _calc_el("strip.text.x", theme)
+        strip_bg_x_el = _calc_el("strip.background.x", theme)
+        strip_txt_y_el = _calc_el("strip.text.y", theme)
+        strip_bg_y_el = _calc_el("strip.background.y", theme)
 
-        def _make_strip(label_text, bg_el, txt_el, rot, name):
-            return grob_tree(
-                rect_grob(x=0.5, y=0.5, width=1, height=1,
-                          gp=Gpar(fill=bg_el["fill"], col=bg_el["colour"]),
-                          name=f"strip.bg.{name}"),
-                text_grob(label=label_text, x=0.5, y=0.5, rot=rot,
-                          just="centre",
-                          gp=Gpar(fontsize=float(txt_el["size"]),
-                                  col=txt_el["colour"]),
-                          name=f"strip.text.{name}"),
-                name=f"strip-{name}",
+        def _props(el, attrs):
+            """Extract attrs from an element, returning None for ElementBlank.
+
+            R: when a strip element is ``element_blank()``, the
+            corresponding grob is simply a ``zeroGrob()``.  We surface
+            this by mapping each attr to ``None``.
+            """
+            if el is None or isinstance(el, _EB):
+                return {k: None for k in attrs}
+            return {k: getattr(el, k, None) for k in attrs}
+
+        strip_txt_x = _props(strip_txt_x_el, ["colour", "size", "angle"])
+        strip_bg_x  = _props(strip_bg_x_el,  ["fill", "colour"])
+        strip_txt_y = _props(strip_txt_y_el, ["colour", "size", "angle"])
+        strip_bg_y  = _props(strip_bg_y_el,  ["fill", "colour"])
+
+        _txt_blank_x = isinstance(strip_txt_x_el, _EB)
+        _bg_blank_x  = isinstance(strip_bg_x_el,  _EB)
+        _txt_blank_y = isinstance(strip_txt_y_el, _EB)
+        _bg_blank_y  = isinstance(strip_bg_y_el,  _EB)
+
+        def _make_strip(label_text, bg_el, txt_el, rot, name,
+                         bg_blank=False, txt_blank=False):
+            """Compose a strip: optional rect bg + optional text.
+
+            R: ElementBlank → zeroGrob, omitted from the output.
+            """
+            from grid_py import null_grob as _null
+            bg = (
+                _null()
+                if bg_blank or bg_el.get("fill") is None and bg_el.get("colour") is None
+                else rect_grob(
+                    x=0.5, y=0.5, width=1, height=1,
+                    gp=Gpar(fill=bg_el.get("fill"), col=bg_el.get("colour")),
+                    name=f"strip.bg.{name}",
+                )
             )
+            txt = (
+                _null()
+                if txt_blank or txt_el.get("size") is None
+                else text_grob(
+                    label=label_text, x=0.5, y=0.5, rot=rot, just="centre",
+                    gp=Gpar(fontsize=float(txt_el["size"]),
+                            col=txt_el.get("colour")),
+                    name=f"strip.text.{name}",
+                )
+            )
+            return grob_tree(bg, txt, name=f"strip-{name}")
 
         def _get_strip_text(vars_list, row_info):
             """Get formatted strip label text using the labeller."""
@@ -666,39 +759,85 @@ class Facet(GGProto):
             result = labeller_fn(lab_dict)
             return result[0] if result else ""
 
+        # Helper: measure strip text height/width in cm
+        # R: assemble_strips → max_height(grobs) / max_width(grobs)
+        from grid_py._size import calc_string_metric
+
+        def _strip_height_cm(labels, txt_el):
+            """Max height of strip labels (R: max_height(strip_grobs))."""
+            fs = float(txt_el.get("size") or 8)
+            max_h = 0.0
+            for lbl in labels:
+                m = calc_string_metric(str(lbl), Gpar(fontsize=fs))
+                max_h = max(max_h, (m["ascent"] + m["descent"]) * 2.54)
+            # Add small padding for strip background
+            return max(max_h + 0.1, 0.2)
+
+        def _strip_width_cm(labels, txt_el):
+            """Max width of strip labels (R: max_width(strip_grobs))."""
+            fs = float(txt_el.get("size") or 8)
+            max_w = 0.0
+            for lbl in labels:
+                m = calc_string_metric(str(lbl), Gpar(fontsize=fs))
+                max_w = max(max_w, (m["ascent"] + m["descent"]) * 2.54)
+            return max(max_w + 0.1, 0.2)
+
         # --- facet_wrap ---
         if wrap_vars and not col_vars and not row_vars:
+            # Collect all wrap labels to measure max height
+            all_wrap_labels = []
+            for _, row_info in layout.iterrows():
+                all_wrap_labels.append(_get_strip_text(wrap_vars, row_info))
+            strip_h = _strip_height_cm(all_wrap_labels, strip_txt_x)
+
             for r in range(nrow, 0, -1):
-                gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=r - 1)
+                gt = gtable_add_rows(gt, unit([strip_h], "cm"), pos=r - 1)
                 panels_in_row = layout[layout["ROW"] == r]
                 for _, row_info in panels_in_row.iterrows():
                     c = int(row_info["COL"])
                     label_text = _get_strip_text(wrap_vars, row_info)
-                    strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"w-{r}-{c}")
+                    strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"w-{r}-{c}",
+                                         bg_blank=_bg_blank_x, txt_blank=_txt_blank_x)
                     gt = gtable_add_grob(gt, strip, t=r, l=c + col_offset,
                                          clip="off", name=f"strip-w-{r}-{c}")
             return gt
 
         # --- Top strip (col vars) ---
         if col_vars:
-            gt = gtable_add_rows(gt, unit([0.35], "cm"), pos=0)
+            # Measure col strip labels
+            col_labels = []
+            for c in range(1, ncol + 1):
+                panel_row = layout[layout["COL"] == c].iloc[0]
+                col_labels.append(_get_strip_text(col_vars, panel_row))
+            strip_h = _strip_height_cm(col_labels, strip_txt_x) if not _txt_blank_x else 0.2
+
+            gt = gtable_add_rows(gt, unit([strip_h], "cm"), pos=0)
             for c in range(1, ncol + 1):
                 panel_row = layout[layout["COL"] == c].iloc[0]
                 label_text = _get_strip_text(col_vars, panel_row)
-                strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"t-{c}")
+                strip = _make_strip(label_text, strip_bg_x, strip_txt_x, 0, f"t-{c}",
+                                     bg_blank=_bg_blank_x, txt_blank=_txt_blank_x)
                 gt = gtable_add_grob(gt, strip, t=1, l=c + col_offset,
                                      clip="off", name=f"strip-t-{c}")
 
         # --- Right strip (row vars) ---
         if row_vars:
-            gt = gtable_add_cols(gt, unit([0.4], "cm"), pos=-1)
+            # Measure row strip labels (rotated text — width = text height)
+            row_labels = []
+            for r in range(1, nrow + 1):
+                panel_row = layout[layout["ROW"] == r].iloc[0]
+                row_labels.append(_get_strip_text(row_vars, panel_row))
+            strip_w = _strip_width_cm(row_labels, strip_txt_y) if not _txt_blank_y else 0.2
+
+            gt = gtable_add_cols(gt, unit([strip_w], "cm"), pos=-1)
             ncol_now = len(gt._widths)
             row_offset = 1 if col_vars else 0
             for r in range(1, nrow + 1):
                 panel_row = layout[layout["ROW"] == r].iloc[0]
                 label_text = _get_strip_text(row_vars, panel_row)
-                rot = float(strip_txt_y["angle"])
-                strip = _make_strip(label_text, strip_bg_y, strip_txt_y, rot, f"r-{r}")
+                rot = float(strip_txt_y.get("angle") or 0)
+                strip = _make_strip(label_text, strip_bg_y, strip_txt_y, rot, f"r-{r}",
+                                     bg_blank=_bg_blank_y, txt_blank=_txt_blank_y)
                 gt = gtable_add_grob(gt, strip, t=r + row_offset, l=ncol_now,
                                      clip="off", name=f"strip-r-{r}")
 
@@ -732,6 +871,8 @@ class Facet(GGProto):
         from gtable_py import gtable_add_grob, gtable_add_rows, gtable_add_cols
         from grid_py import Unit as unit, text_grob, Gpar, null_grob
 
+        from grid_py import grob_height, grob_width
+
         gt = panels
 
         # --- x-axis title (bottom) ---
@@ -742,7 +883,9 @@ class Facet(GGProto):
                 x_label = pair[0]  # primary
 
         if x_label is not None and not _is_null_grob(x_label):
-            gt = gtable_add_rows(gt, unit([0.4], "cm"), pos=-1)
+            # R: gtable_add_rows(table, grobHeight(xlab), pos=-1)
+            xlab_h = grob_height(x_label)
+            gt = gtable_add_rows(gt, xlab_h, pos=-1)
             nrow = len(gt._heights)
             ncol = len(gt._widths)
             gt = gtable_add_grob(
@@ -758,7 +901,9 @@ class Facet(GGProto):
                 y_label = pair[0]  # primary
 
         if y_label is not None and not _is_null_grob(y_label):
-            gt = gtable_add_cols(gt, unit([0.4], "cm"), pos=0)
+            # R: gtable_add_cols(table, grobWidth(ylab), pos=0)
+            ylab_w = grob_width(y_label)
+            gt = gtable_add_cols(gt, ylab_w, pos=0)
             nrow = len(gt._heights)
             gt = gtable_add_grob(
                 gt, y_label, t=1, b=nrow, l=1,

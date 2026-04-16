@@ -2722,11 +2722,14 @@ class GeomHex(Geom):
         else:
             dy = resolution(data["y"].values, zero=False) / np.sqrt(3) / 2 * 1.15
 
-        # R: hexbin::hexcoords(dx, dy)
-        # x = dx * c(1, 1, 0, -1, -1, 0) / 2
-        # y = dy * c(1, -1, -2, -1, 1, 2) / 2
-        hex_x = dx * np.array([1, 1, 0, -1, -1, 0]) / 2
-        hex_y = dy * np.array([1, -1, -2, -1, 1, 2]) / 2
+        # R: hexbin::hexcoords(dx, dy) returns
+        #   x = c( dx,  dx,   0, -dx, -dx,   0)
+        #   y = c( dy, -dy, -2dy, -dy,  dy,  2dy)
+        # (no ``/2`` divisor).  With the divisor the hexagons render
+        # at exactly HALF the intended size, leaving visible gaps
+        # between neighbours — the user-reported "hex not aligned".
+        hex_x = dx * np.array([1.0,  1.0,  0.0, -1.0, -1.0,  0.0])
+        hex_y = dy * np.array([1.0, -1.0, -2.0, -1.0,  1.0,  2.0])
 
         all_x = np.repeat(data["x"].values, 6) + np.tile(hex_x, n)
         all_y = np.repeat(data["y"].values, 6) + np.tile(hex_y, n)

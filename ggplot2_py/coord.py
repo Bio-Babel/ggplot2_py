@@ -52,30 +52,38 @@ __all__ = [
 
 
 def _scale_numeric_range(scale: Any, fallback: Optional[list] = None) -> list:
-    """Return the expanded numeric range for *scale*.
+    """Return the **expanded** numeric range for *scale*.
 
-    In R, ``CoordCartesian$setup_panel_params`` uses
-    ``view_scales_from_scale`` → ``scale$dimension()`` which applies
-    the scale's default expansion (``mult=0.05`` for continuous,
-    ``add=0.6`` for discrete).  This ensures data never sits exactly
-    on the axis boundary.
+    R (coord-cartesian-.R:175-189 ``view_scales_from_scale``):
 
-    We always prefer ``dimension()`` over ``get_limits()`` because
-    ``dimension()`` returns the *expanded* range.
+        expansion <- default_expansion(scale, expand = TRUE)
+        continuous_range <- expand_limits_scale(scale, expansion, limits)
+
+    R's ``Scale$dimension()`` itself defaults to ``expansion(0, 0)``
+    (i.e. no expansion).  Expansion is applied *at the call site* —
+    ``view_scales_from_scale`` passes the per-scale
+    ``default_expansion`` explicitly.  Python previously baked a 5%
+    expansion into ``dimension()`` as the default, which corrupted
+    any caller that needed raw limits (e.g. ``hex_binwidth``).  With
+    that default now matching R (no expansion), we have to apply
+    the expansion here.
     """
     if scale is None:
         return list(fallback or [0, 1])
 
-    # dimension() returns the expanded numeric range for both
-    # discrete (integers + add=0.6) and continuous (limits + mult=0.05).
     if hasattr(scale, "dimension"):
         try:
-            d = list(scale.dimension())
+            # Compute the scale-specific expansion vector (continuous
+            # mult=0.05, discrete add=0.6, honouring a user-supplied
+            # ``expand`` on the scale) and ask dimension() to apply it.
+            from ggplot2_py.scale import default_expansion as _def_exp
+            exp_vec = _def_exp(scale, expand=True)
+            d = list(scale.dimension(expand=exp_vec))
             if len(d) >= 2:
                 float(d[0])
                 float(d[1])
                 return d
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, ImportError):
             pass
 
     # Fallback to get_limits for scales without dimension()

@@ -1231,20 +1231,30 @@ def _hex_bin_summarise(
     z = np.asarray(z, dtype=float)
 
     bw_x, bw_y = binwidth
+    row_h = bw_y * np.sqrt(3) / 2.0
 
-    # Compute hex grid coordinates
-    # Using offset hex coordinates
-    ix = np.floor(x / bw_x).astype(int)
-    iy = np.floor(y / (bw_y * np.sqrt(3) / 2)).astype(int)
+    # R (hexbin.R:8-13, hexbin::hexbin):
+    #   xbnds = c(floor(min(x)/bw_x)*bw_x - 1e-6, …)
+    # The hex lattice is anchored to (xlo, ylo) and lattice nodes
+    # (= hex centres returned by hcell2xy) are at
+    #   even row:  (xlo + bi*bw_x,          ylo + bj*row_h)
+    #   odd  row:  (xlo + (bi+0.5)*bw_x,    ylo + bj*row_h)
+    # Each point goes to the NEAREST lattice node.  Verified against
+    # R's first centre (8.67, 11.73) for mpg cty/hwy — bi=bj=0.
+    eps = 1e-6
+    xlo = np.floor(x.min() / bw_x) * bw_x - eps
+    ylo = np.floor(y.min() / bw_y) * bw_y - eps
 
-    # Offset every other row
+    # Candidate lattice: pick nearest of two adjacent rows then nearest
+    # column within that row (hex nearest-neighbour is exact enough for
+    # rectangular preprocessing at our aspect ratio).
+    ry = (y - ylo) / row_h
+    iy = np.rint(ry).astype(int)
     shifted = iy % 2 == 1
-    ix_adj = ix.copy()
-    x_shifted = x - (0.5 * bw_x * shifted.astype(float))
-    ix_adj = np.floor(x_shifted / bw_x).astype(int)
+    x_shifted = x - 0.5 * bw_x * shifted.astype(float)
+    ix = np.rint((x_shifted - xlo) / bw_x).astype(int)
 
-    # Create bin keys
-    keys = ix_adj.astype(str) + "_" + iy.astype(str)
+    keys = ix.astype(str) + "_" + iy.astype(str)
     unique_keys = np.unique(keys)
 
     results = []
@@ -1254,11 +1264,10 @@ def _hex_bin_summarise(
         if drop and len(z_vals) == 0:
             continue
         val = fun(z_vals, **fun_args)
-        # Center of hex
         parts = key.split("_")
         bi, bj = int(parts[0]), int(parts[1])
-        cx = (bi + 0.5) * bw_x + (0.5 * bw_x if bj % 2 == 1 else 0)
-        cy = (bj + 0.5) * bw_y * np.sqrt(3) / 2
+        cx = xlo + bi * bw_x + (0.5 * bw_x if bj % 2 == 1 else 0.0)
+        cy = ylo + bj * row_h
         results.append({"x": cx, "y": cy, "value": val})
 
     if len(results) == 0:

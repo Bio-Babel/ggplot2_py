@@ -867,23 +867,33 @@ class ScaleContinuous(Scale):
         expand: Optional[np.ndarray] = None,
         limits: Optional[Any] = None,
     ) -> np.ndarray:
-        """Return the expanded continuous range.
+        """Return the (optionally expanded) continuous range.
+
+        Mirrors R ``Scale$dimension`` (scale-.R:713):
+
+            dimension = function(self, expand = expansion(0, 0), limits = ...)
+
+        R's default is **no expansion** (``expansion(0, 0)``).  The
+        caller applies expansion explicitly when needed (e.g. at
+        panel-param setup).  Python used to default to
+        ``expansion(0.05, 0)`` which inflated values that downstream
+        consumers — notably ``hex_binwidth = diff(x$dimension()) /
+        bins`` — expected to be the raw data extent.
 
         Parameters
         ----------
         expand : array-like, optional
-            Expansion vector.
+            Expansion vector (defaults to none).
         limits : array-like, optional
             Scale limits.
 
         Returns
         -------
         numpy.ndarray
-            Length-2 expanded range.
+            Length-2 range.
         """
         if expand is None:
-            # R default for continuous scales: expansion(mult = 0.05)
-            expand = expansion(0.05, 0)
+            expand = expansion(0, 0)
         if limits is None:
             limits = self.get_limits()
         return expand_range4(limits, expand)

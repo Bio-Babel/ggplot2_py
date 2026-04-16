@@ -395,10 +395,22 @@ def build_colourbar_labels(
     if rng == 0:
         rng = 1.0
 
+    # R (guide-colorbar.R: build_labels filters breaks to the visible
+    # bar via GuideColourbar$extract_key / limit clip).  A break at
+    # e.g. 0 when limits=[1,14] lies at NPC = -0.077 and would render
+    # OUTSIDE the bar extent — both visually (overflowing the legend
+    # frame) and semantically (labelling a colour that isn't in the
+    # bar).  Skip those breaks, matching R.
+    _EPS = 1e-9
     grobs = []
     for i, (brk, lab) in enumerate(zip(breaks, break_labels)):
-        # Position as NPC (0-1) along the bar
-        npc_pos = (float(brk) - lo) / rng
+        try:
+            brk_val = float(brk)
+        except (TypeError, ValueError):
+            continue
+        npc_pos = (brk_val - lo) / rng
+        if npc_pos < -_EPS or npc_pos > 1 + _EPS:
+            continue
 
         if direction == "vertical":
             grobs.append(text_grob(
@@ -466,9 +478,17 @@ def build_colourbar_ticks(
     if rng == 0:
         rng = 1.0
 
+    # Filter breaks to the visible bar range (R guide-colorbar.R:
+    # extract_key discards breaks outside [lo, hi]).
+    _EPS = 1e-9
     positions = []
     for brk in breaks:
-        npc_pos = (float(brk) - lo) / rng
+        try:
+            npc_pos = (float(brk) - lo) / rng
+        except (TypeError, ValueError):
+            continue
+        if npc_pos < -_EPS or npc_pos > 1 + _EPS:
+            continue
         positions.append(npc_pos)
 
     if not draw_lim[0] and positions:

@@ -437,9 +437,13 @@ class TestMakeLabels:
         result = make_labels(m)
         assert result["x"] == "x"
 
-    def test_non_mapping(self):
+    def test_plain_dict_accepted(self):
+        # Plain dicts come through Stat/Geom default_aes; they're handled
+        # the same way as Mapping instances (both are just named key/value
+        # pairs).  Atomic values become their string form — consistent with
+        # ``test_numeric_value`` above.
         result = make_labels({"x": "a"})
-        assert result == {}
+        assert result == {"x": "a"}
 
     def test_numeric_value(self):
         m = Mapping(x=42)

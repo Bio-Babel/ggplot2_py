@@ -1230,6 +1230,14 @@ def _hex_bin_summarise(
     y = np.asarray(y, dtype=float)
     z = np.asarray(z, dtype=float)
 
+    # Empty input → empty output.  R's ``hex_bounds`` silently works on
+    # zero-length vectors (``min(numeric(0))`` returns ``Inf`` with a
+    # warning, the pipeline produces an empty data frame).  NumPy's
+    # ``np.min`` / ``np.max`` raise on empty arrays, so short-circuit.
+    if x.size == 0:
+        return pd.DataFrame({"x": [], "y": [], "value": [],
+                             "width": [], "height": []})
+
     bw_x, bw_y = binwidth
     row_h = bw_y * np.sqrt(3) / 2.0
 

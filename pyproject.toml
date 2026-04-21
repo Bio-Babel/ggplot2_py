@@ -3,34 +3,86 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ggplot2_py"
-version = "4.0.2.9000-c02c05a"
-description = "Python port of the R ggplot2 package"
+name = "ggplot2-python"
+version = "4.0.2.9000"
+description = "Python port of the R ggplot2 package (tracks R ggplot2 4.0.2.9000)"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jeffery Liu", email = "jeffliu.lucky@gmail.com" },
+]
+keywords = [
+    "ggplot2",
+    "grammar-of-graphics",
+    "visualization",
+    "R-port",
+    "plotting",
+    "data-visualization",
+    "statistical-graphics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Typing :: Typed",
+]
 dependencies = [
-    "grid_py>=0.1.0",
-    "gtable_py>=0.1.0",
-    "scales>=0.1.0",
+    "rgrid-python>=4.5.3",
+    "gtable-python>=0.3.6",
+    "scales-python>=1.4.0",
     "numpy>=1.24",
-    "matplotlib>=3.6",
     "pandas>=1.5",
     "scipy>=1.10",
     "contourpy>=1.0",
     "statsmodels>=0.13",
     "geopandas>=0.12",
     "Pillow>=9.0",
+    "matplotlib>=3.6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "ruff"]
-docs = ["mkdocs", "mkdocstrings[python]", "mkdocs-material", "mkdocs-jupyter"]
+dev = ["pytest", "pytest-cov", "ruff", "build", "twine"]
+docs = [
+    "mkdocs",
+    "mkdocstrings[python]",
+    "mkdocs-material",
+    "mkdocs-jupyter",
+]
+
+[project.urls]
+Homepage      = "https://github.com/Bio-Babel/ggplot2-python"
+Repository    = "https://github.com/Bio-Babel/ggplot2-python"
+Issues        = "https://github.com/Bio-Babel/ggplot2-python/issues"
+Documentation = "https://github.com/Bio-Babel/ggplot2-python#readme"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ggplot2_py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["ggplot2_py/", "tutorials/", "LICENSE", "README.md"]
+exclude = [
+    "tutorials/",
+    "docs/",
+    "tests/",
+    "site/",
+    "validation/",
+    "assets/",
+    "mkdocs.yml",
+    ".github/",
+    "*.egg-info/",
+    "build/",
+    "dist/",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

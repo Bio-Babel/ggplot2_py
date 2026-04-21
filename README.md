@@ -22,31 +22,17 @@ These capabilities have no R equivalent and leverage Python-specific language fe
 | **Protocol contracts** | `typing.Protocol` | `isinstance(my_geom, GeomProtocol)` — structural type checking for extensions |
 | **Scoped defaults** | `contextvars.ContextVar` | `with ggplot_defaults(theme=theme_minimal()): ...` — thread-safe scoped defaults |
 
-## Dependencies
-
-This package depends on three companion R-to-Python ports from the same project:
-
-| Package | R source | Python import | Repository |
-|---------|----------|---------------|------------|
-| **grid_py** | `grid` | `grid_py` | [R2pyBioinformatics/grid_py](https://github.com/R2pyBioinformatics/grid_py) |
-| **gtable_py** | `gtable` | `gtable_py` | [R2pyBioinformatics/gtable_py](https://github.com/R2pyBioinformatics/gtable_py) |
-| **scales_py** | `scales` | `scales` | [R2pyBioinformatics/scales_py](https://github.com/R2pyBioinformatics/scales_py) |
-
-Additional Python dependencies: numpy, pandas, matplotlib, scipy, pycairo.
-
 ## Installation
 
 ```bash
-# Install companion packages first
-pip install git+https://github.com/R2pyBioinformatics/grid_py.git
-pip install git+https://github.com/R2pyBioinformatics/gtable_py.git
-pip install git+https://github.com/R2pyBioinformatics/scales_py.git
+# From PyPI
+pip install ggplot2-python
+```
 
-# Install ggplot2_py
-pip install git+https://github.com/R2pyBioinformatics/ggplot2_py.git
+For a local development:
 
-# Or for development (editable install)
-git clone https://github.com/R2pyBioinformatics/ggplot2_py.git
+```bash
+git clone https://github.com/Bio-Babel/ggplot2-python.git
 cd ggplot2_py
 pip install -e ".[dev]"
 ```
@@ -141,10 +127,3 @@ ggplot2_py is designed as an **extensible platform**. The following table summar
 | Build hooks | `plot.add_build_hook(timing, stage, fn)` | Intercept data at any pipeline stage |
 | Protocol validation | `isinstance(obj, GeomProtocol)` | Verify structural conformance |
 | Scoped defaults | `with ggplot_defaults(theme=...):` | Thread-safe scoped defaults |
-
-## Documentation
-
-```bash
-pip install -e ".[docs]"
-mkdocs serve
-```

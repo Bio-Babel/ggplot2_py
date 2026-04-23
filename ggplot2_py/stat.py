@@ -269,7 +269,7 @@ def _is_mapped_discrete(x: Any) -> bool:
     if isinstance(x, pd.Categorical):
         return True
     if isinstance(x, pd.Series):
-        if pd.api.types.is_categorical_dtype(x):
+        if isinstance(x.dtype, pd.CategoricalDtype):
             return True
         if pd.api.types.is_object_dtype(x):
             return True
@@ -5549,7 +5549,7 @@ class StatSum(Stat):
 
         # Group by all aesthetic columns except weight
         group_cols = [c for c in data.columns if c != "weight"]
-        grouped = data.groupby(group_cols, sort=False, dropna=False)
+        grouped = data.groupby(group_cols, sort=False, dropna=False, observed=False)
         counts = grouped["weight"].sum().reset_index()
         counts.rename(columns={"weight": "n"}, inplace=True)
 

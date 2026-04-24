@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ggplot2-python"
-version = "4.0.2.9000.post1"
+version = "4.0.2.9000.post2"
 description = "Python port of the R ggplot2 package (tracks R ggplot2 4.0.2.9000)"
 readme = "README.md"
 requires-python = ">=3.10"

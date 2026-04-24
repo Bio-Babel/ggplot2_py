@@ -477,6 +477,7 @@ from ggplot2_py.coord import (
     coord_transform,
     coord_munch,
     is_coord,
+    sf_transform_xy,
 )
 
 # ---------------------------------------------------------------------------

@@ -155,6 +155,151 @@ def _validate_guide(guide: Any) -> Any:
     cli_abort(f"Cannot resolve guide: {guide!r}")
 
 
+def _parse_binned_breaks(
+    scale: Any,
+    breaks: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
+    """Parse breaks / limits of a binned scale into (breaks, limits, bin_at).
+
+    Faithful port of R's ``parse_binned_breaks`` (guide-bins.R:342-382).
+
+    When ``scale$labels`` is a waiver or callable, NA-valued breaks are
+    stripped. For numeric breaks the result covers ``[limits[0], limits[1]]``
+    with any user breaks in between; midpoints become ``bin_at``. For
+    character-coded bins of the form ``"(lo, hi]"`` the endpoints are
+    parsed out of the string.
+
+    Parameters
+    ----------
+    scale : Scale
+        Trained binned scale.
+    breaks : array-like, optional
+        Pre-extracted breaks; default uses ``scale.get_breaks()``.
+
+    Returns
+    -------
+    dict or None
+        ``{"breaks": array, "limits": (lo, hi), "bin_at": array}`` or
+        ``None`` if the scale has no breaks.
+    """
+    import re
+
+    if breaks is None:
+        breaks = getattr(scale, "get_breaks", lambda: None)()
+    if breaks is None:
+        return None
+    breaks = np.asarray(breaks, dtype=object)
+
+    scale_labels = getattr(scale, "labels", None)
+    labels_is_waiver_or_fn = is_waiver(scale_labels) or callable(scale_labels)
+    if labels_is_waiver_or_fn:
+        mask = np.array([not _is_na(b) for b in breaks])
+        breaks = breaks[mask]
+
+    if breaks.size == 0:
+        return None
+
+    # Numeric branch
+    if all(isinstance(b, (int, float, np.integer, np.floating)) and not _is_na(b)
+           for b in breaks) or _is_numeric_breaks(breaks):
+        breaks = np.asarray([float(b) if not _is_na(b) else np.nan for b in breaks],
+                            dtype=float)
+        limits = getattr(scale, "get_limits", lambda: (np.nanmin(breaks),
+                                                       np.nanmax(breaks)))()
+        limits = tuple(float(v) for v in limits)
+        scale_breaks = getattr(scale, "breaks", None)
+        if not (isinstance(scale_breaks, (list, tuple, np.ndarray))
+                and all(isinstance(b, (int, float, np.integer, np.floating))
+                        for b in scale_breaks)):
+            # R: breaks[breaks %in% limits] <- NA
+            breaks = np.array([
+                np.nan if (not np.isnan(b) and b in limits) else b
+                for b in breaks
+            ], dtype=float)
+
+        # oob_censor
+        try:
+            from scales import oob_censor as _oob_censor
+            breaks = np.asarray(_oob_censor(breaks, limits), dtype=float)
+        except Exception:
+            breaks = np.where(
+                (breaks < limits[0]) | (breaks > limits[1]),
+                np.nan, breaks,
+            )
+
+        # unique0(c(limits[1], breaks, limits[2]))
+        combined = np.concatenate(([limits[0]], breaks, [limits[1]]))
+        # Preserve order while removing duplicates (like R's unique0)
+        seen: set = set()
+        all_breaks: List[float] = []
+        for v in combined:
+            key = "NA" if (isinstance(v, float) and np.isnan(v)) else v
+            if key not in seen:
+                seen.add(key)
+                all_breaks.append(v)
+        # sort na.last = NA → drop NAs
+        all_breaks = sorted(b for b in all_breaks
+                            if not (isinstance(b, float) and np.isnan(b)))
+        all_breaks_arr = np.asarray(all_breaks, dtype=float)
+        # bin_at = all_breaks[-1] - diff(all_breaks) / 2
+        # R: all_breaks[-1] drops first element
+        tail = all_breaks_arr[1:]
+        diffs = np.diff(all_breaks_arr)
+        bin_at = tail - diffs / 2.0
+        return {"breaks": breaks, "limits": limits, "bin_at": bin_at}
+
+    # Character / interval branch: "(lo, hi]" or "[lo, hi)"
+    nums: List[float] = []
+    for b in breaks:
+        s = str(b)
+        # strip brackets
+        cleaned = re.sub(r"[\(\)\[\]]", "", s)
+        parts = re.split(r",\s?", cleaned)
+        for p in parts:
+            try:
+                nums.append(float(p))
+            except (TypeError, ValueError):
+                nums.append(np.nan)
+    nums_arr = np.asarray(nums, dtype=float)
+    if np.any(np.isnan(nums_arr)):
+        cli_abort(
+            "Breaks are not formatted correctly for a bin legend. "
+            "Use `(<lower>, <upper>]` format to indicate bins."
+        )
+    bin_at = breaks.copy()
+    # R: all_breaks <- nums[c(1, seq_along(breaks) * 2)]
+    idx = [0] + [i * 2 + 1 for i in range(len(breaks))]
+    all_breaks = nums_arr[idx]
+    limits = (all_breaks[0], all_breaks[-1])
+    # R: breaks <- all_breaks[-c(1, length(all_breaks))]
+    inner = all_breaks[1:-1]
+    return {"breaks": inner, "limits": limits, "bin_at": bin_at}
+
+
+def _is_na(x: Any) -> bool:
+    """Test whether ``x`` is R-style NA / Python None / float NaN."""
+    if x is None:
+        return True
+    if isinstance(x, float) and np.isnan(x):
+        return True
+    try:
+        if np.isnan(x):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+def _is_numeric_breaks(breaks: Any) -> bool:
+    """Return True if every non-NA element of *breaks* is numeric."""
+    for b in breaks:
+        if _is_na(b):
+            continue
+        if not isinstance(b, (int, float, np.integer, np.floating)):
+            return False
+    return True
+
+
 def _resolve_guide_name(name: str) -> type:
     """Map a short string name to a Guide class.
 
@@ -267,6 +412,26 @@ class Guide(GGProto):
             ".value": breaks,
             ".label": labels if labels is not None else [str(b) for b in breaks],
         })
+
+        # Mirror R's Guide$extract_key (guide-.R:285-290):
+        #   if (is.numeric(breaks)) {
+        #     range <- scale$continuous_range %||% scale$get_limits()
+        #     key  <- vec_slice(key, is.finite(oob_censor_any(breaks, range)))
+        #   }
+        breaks_arr = np.asarray(breaks)
+        if breaks_arr.dtype.kind in ("i", "u", "f"):
+            range_ = getattr(scale, "continuous_range", None)
+            if range_ is None and hasattr(scale, "get_limits"):
+                range_ = scale.get_limits()
+            if range_ is not None:
+                from scales import oob_censor_any as _oob_censor_any
+                censored = np.asarray(
+                    _oob_censor_any(breaks_arr.astype(float), range=np.asarray(range_, dtype=float)),
+                    dtype=float,
+                )
+                mask = np.isfinite(censored)
+                key = key.loc[mask].reset_index(drop=True)
+
         return key
 
     @staticmethod
@@ -1262,7 +1427,7 @@ class GuideColoursteps(GuideColourbar):
     """Discretised (stepped) colour bar guide.
 
     Displays areas between breaks as single constant colours instead of
-    a smooth gradient.
+    a smooth gradient.  R source: ``ggplot2/R/guide-colorsteps.R``.
 
     Attributes
     ----------
@@ -1281,6 +1446,347 @@ class GuideColoursteps(GuideColourbar):
 
     available_aes: List[str] = ["colour", "color", "fill"]
 
+    # -- extract_key (guide-colorsteps.R:98-135) -----------------------------
+
+    @staticmethod
+    def extract_key(
+        scale: Any,
+        aesthetic: str,
+        **kwargs: Any,
+    ) -> Optional[pd.DataFrame]:
+        """Extract key for a coloursteps guide.
+
+        Mirrors R's ``GuideColoursteps$extract_key``: falls back to
+        :meth:`Guide.extract_key` for non-numeric breaks when
+        ``even.steps`` is FALSE; otherwise parses breaks via
+        :func:`_parse_binned_breaks` and builds a key with ``.value`` set
+        to sequential integers (even-steps mode) or to the breaks.
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained binned colour / fill scale.
+        aesthetic : str
+            Aesthetic name (column to populate with mapped colours).
+        **kwargs : Any
+            Accepts ``even_steps`` / ``even.steps`` (R-style), ignored
+            otherwise.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Key with columns ``<aesthetic>``, ``.value``, ``.label``.
+            ``None`` if the scale has no breaks.
+        """
+        even_steps = kwargs.get("even.steps", kwargs.get("even_steps", True))
+        breaks = getattr(scale, "get_breaks", lambda: None)()
+        if breaks is None:
+            return None
+        breaks_arr = np.asarray(breaks, dtype=object)
+
+        if not (even_steps or not _is_numeric_breaks(breaks_arr)):
+            return Guide.extract_key(scale, aesthetic)
+
+        parsed = _parse_binned_breaks(scale, breaks_arr)
+        if parsed is None:
+            return None
+        limits = parsed["limits"]
+        inner_breaks = parsed["breaks"]
+        mapped = getattr(scale, "map", lambda x: x)(inner_breaks)
+        if isinstance(mapped, np.ndarray):
+            mapped = mapped.tolist()
+
+        key = pd.DataFrame({aesthetic: mapped})
+        if even_steps:
+            key[".value"] = np.arange(1, len(inner_breaks) + 1, dtype=float)
+        else:
+            key[".value"] = np.asarray(inner_breaks, dtype=float)
+        key[".label"] = getattr(scale, "get_labels", lambda b: [str(v) for v in b])(inner_breaks)
+
+        # vec_slice(key, !is.na(breaks)) — inner_breaks has no NAs post-oob_censor
+        mask = ~np.isnan(np.asarray(inner_breaks, dtype=float))
+        key = key.loc[mask].reset_index(drop=True)
+
+        # Bottom / top limit handling
+        if len(inner_breaks) > 0 and inner_breaks[0] in limits:
+            key[".value"] = key[".value"] - 1
+            key.iat[0, 0] = np.nan
+        if len(inner_breaks) > 0 and inner_breaks[-1] in limits:
+            key.iat[len(key) - 1, 0] = np.nan
+
+        # Stash parsed for downstream methods (R uses attributes; we use
+        # a DataFrame attribute via .attrs).
+        key.attrs["parsed"] = parsed
+        return key
+
+    # -- extract_decor (guide-colorsteps.R:137-159) --------------------------
+
+    @staticmethod
+    def extract_decor(
+        scale: Any,
+        aesthetic: str,
+        key: Optional[pd.DataFrame] = None,
+        reverse: bool = False,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Extract discrete decor bands for the stepped bar.
+
+        Mirrors ``GuideColoursteps$extract_decor``.  Builds a DataFrame
+        with one row per bin: ``colour`` (mapped colour at the bin
+        midpoint), ``min``, ``max`` (bin boundaries in even-step or
+        data-space coordinates), plus ``.size`` bookkeeping.
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained binned scale.
+        aesthetic : str
+            Aesthetic name (unused; kept for signature parity).
+        key : pd.DataFrame, optional
+            Previously extracted key; may carry a ``parsed`` attribute
+            to avoid recomputation.
+        reverse : bool
+            Unused here (reverse is applied later in extract_params).
+        **kwargs : Any
+            Accepts ``even.steps`` / ``even_steps``, ``alpha``, ``nbin``.
+
+        Returns
+        -------
+        pd.DataFrame
+            ``colour``, ``min``, ``max``, ``.size``.
+        """
+        even_steps = kwargs.get("even.steps", kwargs.get("even_steps", True))
+        alpha = kwargs.get("alpha", np.nan)
+        parsed = None
+        if key is not None and hasattr(key, "attrs"):
+            parsed = key.attrs.get("parsed")
+
+        if parsed is not None:
+            breaks = parsed["breaks"]
+            limits = parsed["limits"]
+            bin_at = parsed["bin_at"]
+        else:
+            breaks = np.asarray(getattr(scale, "get_breaks", lambda: [])(),
+                                dtype=float)
+            limits = tuple(getattr(scale, "get_limits", lambda: (np.nanmin(breaks),
+                                                                 np.nanmax(breaks)))())
+            bin_at = None
+
+        # sort unique0(c(limits, breaks))
+        combined = np.concatenate(([limits[0], limits[1]],
+                                   np.asarray(breaks, dtype=float)))
+        breaks_all = np.unique(combined[~np.isnan(combined)])
+        n = len(breaks_all)
+        if bin_at is None:
+            bin_at = (breaks_all[1:] + breaks_all[:-1]) / 2.0
+
+        if even_steps:
+            breaks_used = np.arange(n, dtype=float)  # 0..n-1
+        else:
+            breaks_used = breaks_all
+
+        colours = getattr(scale, "map", lambda x: x)(bin_at)
+        if isinstance(colours, np.ndarray):
+            colours = colours.tolist()
+        # alpha
+        if alpha is not None and not (isinstance(alpha, float) and np.isnan(alpha)):
+            try:
+                from scales import alpha as _scales_alpha
+                colours = [_scales_alpha(c, alpha) for c in colours]
+            except ImportError:
+                pass
+
+        n_bins = len(bin_at)
+        return pd.DataFrame({
+            "colour": colours,
+            "min": breaks_used[:-1],
+            "max": breaks_used[1:],
+            ".size": [n_bins] * n_bins,
+        })
+
+    # -- extract_params (guide-colorsteps.R:161-206) -------------------------
+
+    @staticmethod
+    def extract_params(
+        scale: Any,
+        params: Dict[str, Any],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Post-process coloursteps parameters.
+
+        Propagates ``show.limits``, appends limit rows to the key when
+        requested, and rescales ``key$.value`` / ``decor$min`` /
+        ``decor$max`` onto [0, 1].
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained scale.
+        params : dict
+            Guide parameters with ``key`` and ``decor`` populated.
+        **kwargs : Any
+            Accepts ``title``.
+
+        Returns
+        -------
+        dict
+            Updated parameters.
+        """
+        show_limits = params.get("show.limits")
+        if show_limits is None:
+            show_limits = getattr(scale, "show_limits", None) or False
+
+        scale_labels = getattr(scale, "labels", None)
+        if show_limits and (isinstance(scale_labels, (list, np.ndarray))):
+            cli_warn(
+                "`show.limits` is ignored when `labels` are given as a "
+                "character vector.  Either add the limits to `breaks` or "
+                "provide a function for `labels`."
+            )
+            show_limits = False
+
+        key = params.get("key")
+        decor = params.get("decor")
+        if show_limits and key is not None and not key.empty and decor is not None:
+            parsed = key.attrs.get("parsed") if hasattr(key, "attrs") else None
+            limits = (parsed["limits"] if parsed is not None
+                      else getattr(scale, "get_limits", lambda: (0, 1))())
+            # Prepend/append NA-only rows
+            na_row = {c: np.nan for c in key.columns}
+            new_rows = [na_row] + [r for r in key.to_dict(orient="records")] + [na_row]
+            key = pd.DataFrame(new_rows).reset_index(drop=True)
+            n = len(key)
+            # Fill in value/label at extremes
+            value_range = (float(np.min(decor["min"])),
+                           float(np.max(decor["max"])))
+            key.at[0, ".value"] = value_range[0]
+            key.at[n - 1, ".value"] = value_range[1]
+            lim_labels = getattr(scale, "get_labels", lambda l: [str(v) for v in l])(limits)
+            key.at[0, ".label"] = lim_labels[0]
+            key.at[n - 1, ".label"] = lim_labels[-1]
+            # drop redundant endpoints when duplicated
+            if key.at[0, ".value"] == key.at[1, ".value"]:
+                key = key.iloc[1:].reset_index(drop=True)
+                n -= 1
+            if key.at[n - 2, ".value"] == key.at[n - 1, ".value"]:
+                key = key.iloc[:-1].reset_index(drop=True)
+            params["key"] = key
+
+        # title
+        title = kwargs.get("title")
+        scale_name = getattr(scale, "name", None)
+        if is_waiver(params.get("title")):
+            if title is not None and not is_waiver(title):
+                params["title"] = title
+            elif scale_name is not None:
+                params["title"] = scale_name
+
+        # rescale values onto [0, 1] using decor min/max as the full range
+        if decor is not None and len(decor) > 0:
+            limits_range = (float(decor["min"].iloc[0]),
+                            float(decor["max"].iloc[-1]))
+            if params.get("reverse"):
+                limits_range = (limits_range[1], limits_range[0])
+            from scales import rescale as _rescale
+            if key is not None and not key.empty:
+                key[".value"] = _rescale(key[".value"].to_numpy(),
+                                          from_range=limits_range)
+                # oob-censor
+                key = key.loc[
+                    ~((key[".value"] < 0) | (key[".value"] > 1))
+                ].reset_index(drop=True)
+                params["key"] = key
+            decor = decor.copy()
+            decor["min"] = _rescale(decor["min"].to_numpy(),
+                                     from_range=limits_range)
+            decor["max"] = _rescale(decor["max"].to_numpy(),
+                                     from_range=limits_range)
+            params["decor"] = decor
+        return params
+
+    # -- build_decor (guide-colorsteps.R:208-229) ----------------------------
+
+    @staticmethod
+    def build_decor(
+        decor: Any,
+        grobs: Any,
+        elements: Dict[str, Any],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build stepped-rectangle bar grobs.
+
+        Mirrors ``GuideColoursteps$build_decor``. Returns a dict with
+        ``bar`` (a rect_grob covering each band) and ``frame`` (an
+        optional border), matching the structure expected by the
+        render pipeline in ``plot_render.py``.
+
+        Parameters
+        ----------
+        decor : pd.DataFrame
+            Decor frame produced by :meth:`extract_decor`.
+        grobs : dict
+            Currently built grobs (``ticks`` may be referenced).
+        elements : dict
+            Resolved theme elements.
+        params : dict
+            Guide parameters (``direction`` is read).
+
+        Returns
+        -------
+        dict
+            ``{"bar": grob, "frame": grob, "ticks": grob}``.
+        """
+        direction = params.get("direction", "vertical") or "vertical"
+        if decor is None or len(decor) == 0:
+            return {"bar": None, "frame": None, "ticks": grobs.get("ticks")
+                    if isinstance(grobs, dict) else None}
+
+        from grid_py import Gpar, rect_grob, null_grob
+        sizes = (decor["max"].to_numpy(dtype=float)
+                 - decor["min"].to_numpy(dtype=float))
+        just = (decor["min"].to_numpy(dtype=float)
+                > decor["max"].to_numpy(dtype=float)).astype(float)
+        colours = list(decor["colour"])
+        n = len(colours)
+        gp = Gpar(col=None, fill=colours)
+
+        if direction == "vertical":
+            bar = rect_grob(
+                x=[0.0] * n,
+                y=list(decor["min"].to_numpy(dtype=float)),
+                width=[1.0] * n,
+                height=list(np.abs(sizes)),
+                just=("left", "bottom"),
+                default_units="npc",
+                gp=gp,
+                name="coloursteps.bar",
+            )
+        else:
+            bar = rect_grob(
+                x=list(decor["min"].to_numpy(dtype=float)),
+                y=[0.0] * n,
+                width=list(np.abs(sizes)),
+                height=[1.0] * n,
+                just=("left", "bottom"),
+                default_units="npc",
+                gp=gp,
+                name="coloursteps.bar",
+            )
+
+        frame = None
+        frame_el = elements.get("frame") if isinstance(elements, dict) else None
+        if frame_el is not None:
+            frame = rect_grob(
+                gp=Gpar(col="grey50", fill=None, lwd=0.5),
+                name="coloursteps.frame",
+            )
+
+        return {
+            "bar": bar,
+            "frame": frame,
+            "ticks": grobs.get("ticks") if isinstance(grobs, dict) else None,
+        }
+
 
 # ============================================================================
 # GuideBins -- binned legend guide
@@ -1289,8 +1795,9 @@ class GuideColoursteps(GuideColourbar):
 class GuideBins(GuideLegend):
     """Binned legend guide.
 
-    A version of the legend guide for binned scales.  Places ticks between
-    keys and optionally shows a small axis.
+    A version of the legend guide for binned scales.  Places ticks
+    between keys and optionally shows a small axis.  R source:
+    ``ggplot2/R/guide-bins.R``.
 
     Attributes
     ----------
@@ -1302,8 +1809,14 @@ class GuideBins(GuideLegend):
 
     params: Dict[str, Any] = {
         **GuideLegend.params,
+        # Defaults mirror R's GuideBins$params (guide-bins.R:116-135)
+        "default_axis": None,
+        "default_ticks": None,
         "angle": None,
-        "show.limits": None,
+        "override.aes": {},
+        "reverse": False,
+        "order": 0,
+        "show.limits": False,
         "name": "bins",
     }
 
@@ -1312,7 +1825,396 @@ class GuideBins(GuideLegend):
     elements: Dict[str, str] = {
         **GuideLegend.elements,
         "axis_line": "legend.axis.line",
+        "ticks_length": "legend.ticks.length",
+        "ticks": "legend.ticks",
     }
+
+    # -- extract_key (guide-bins.R:146-187) ----------------------------------
+
+    @staticmethod
+    def extract_key(
+        scale: Any,
+        aesthetic: str,
+        show_limits: bool = False,
+        reverse: bool = False,
+        **kwargs: Any,
+    ) -> Optional[pd.DataFrame]:
+        """Extract key for a binned legend.
+
+        Produces one row per bin + one trailing NA row used to anchor
+        the final tick.  Each row carries ``.value`` in [0, 1], ``.show``
+        indicating whether the limit tick is forced on, and ``.label``
+        derived from the scale's bin labels.
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained binned scale.
+        aesthetic : str
+            Aesthetic name (the mapped-value column).
+        show_limits : bool
+            Unused here (extract_params applies it).  Accepted for
+            signature parity with R.
+        reverse : bool
+            Unused here; extract_params handles reversal.
+        **kwargs : Any
+            Accepts ``show.limits`` (R-style) as an alias.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Key frame or ``None`` if no breaks.
+        """
+        if "show.limits" in kwargs:
+            show_limits = bool(kwargs["show.limits"])
+        breaks = getattr(scale, "get_breaks", lambda: None)()
+        parsed = _parse_binned_breaks(scale, breaks)
+        if parsed is None:
+            return None
+        limits = parsed["limits"]
+        inner_breaks = parsed["breaks"]
+        bin_at = parsed["bin_at"]
+
+        # key: one row per bin midpoint + one trailing NA row
+        mapped_mid = getattr(scale, "map", lambda x: x)(bin_at)
+        if isinstance(mapped_mid, np.ndarray):
+            mapped_mid = mapped_mid.tolist()
+        values = list(mapped_mid) + [np.nan]
+        n_rows = len(values)
+
+        # .value = seq_along - 1 / (n - 1)
+        if n_rows > 1:
+            value_seq = np.arange(n_rows, dtype=float) / (n_rows - 1)
+        else:
+            value_seq = np.zeros(n_rows, dtype=float)
+
+        key = pd.DataFrame({
+            aesthetic: values,
+            ".value": value_seq,
+            ".show": [np.nan] * n_rows,
+        })
+
+        labels = getattr(scale, "get_labels", lambda b: [str(v) for v in b])(inner_breaks)
+        if labels is None:
+            labels = [str(v) for v in inner_breaks]
+        labels = list(labels)
+        # labels <- labels[!is.na(breaks)]; breaks <- breaks[!is.na(breaks)]
+        if isinstance(inner_breaks, np.ndarray):
+            mask = ~np.isnan(inner_breaks)
+            labels = [lbl for lbl, m in zip(labels, mask) if m]
+            inner_breaks = inner_breaks[mask]
+
+        # Scale-level label-override check
+        scale_labels = getattr(scale, "labels", None)
+        if isinstance(scale_labels, (list, tuple, np.ndarray)) and \
+                not callable(scale_labels) and not is_waiver(scale_labels):
+            limit_lab = [np.nan, np.nan]
+        else:
+            limit_lab = list(getattr(scale, "get_labels",
+                                     lambda l: [str(v) for v in l])(limits))
+            if len(limit_lab) < 2:
+                limit_lab = limit_lab + [np.nan] * (2 - len(limit_lab))
+
+        # Prepend / append limit labels or force .show = TRUE
+        if len(inner_breaks) > 0:
+            if inner_breaks[0] not in limits:
+                labels = [limit_lab[0]] + labels
+            else:
+                key.at[0, ".show"] = True
+            if inner_breaks[-1] not in limits:
+                labels = labels + [limit_lab[1]]
+            else:
+                key.at[len(key) - 1, ".show"] = True
+
+        # Pad labels to match rows
+        if len(labels) < n_rows:
+            labels = labels + [np.nan] * (n_rows - len(labels))
+        elif len(labels) > n_rows:
+            labels = labels[:n_rows]
+        key[".label"] = labels
+
+        # oob_censor_any(key$.value) — drop rows with NaN .value
+        key = key.loc[~key[".value"].isna()].reset_index(drop=True)
+        return key
+
+    # -- extract_params (guide-bins.R:189-224) -------------------------------
+
+    @staticmethod
+    def extract_params(
+        scale: Any,
+        params: Dict[str, Any],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Finalise bins-guide parameters after key extraction.
+
+        Resolves ``show.limits``, strips the ``.show`` helper column,
+        reverses the key if requested, and resolves the title.
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained scale.
+        params : dict
+            Current parameters (``key`` present).
+        **kwargs : Any
+            Accepts ``title``.
+
+        Returns
+        -------
+        dict
+            Updated parameters.
+        """
+        show_limits = params.get("show.limits")
+        if show_limits is None:
+            show_limits = getattr(scale, "show_limits", None)
+        if show_limits is None:
+            show_limits = False
+
+        scale_labels = getattr(scale, "labels", None)
+        if show_limits and isinstance(scale_labels, (list, np.ndarray)) \
+                and not callable(scale_labels) and not is_waiver(scale_labels):
+            cli_warn(
+                "`show.limits` is ignored when `labels` are given as a "
+                "character vector. Either add the limits to `breaks` or "
+                "provide a function for `labels`."
+            )
+            show_limits = False
+
+        # rep_len(show_limits, 2)
+        show_limits_pair = [bool(show_limits), bool(show_limits)]
+
+        key = params.get("key")
+        if key is not None and len(key) > 0 and ".show" in key.columns:
+            first_show = key[".show"].iloc[0]
+            last_show = key[".show"].iloc[-1]
+            # R: show.limits <- ifelse(is.na(show), show.limits, show)
+            if not _is_na(first_show):
+                show_limits_pair[0] = bool(first_show)
+            if not _is_na(last_show):
+                show_limits_pair[1] = bool(last_show)
+            key = key.drop(columns=[".show"])
+        params["show.limits"] = show_limits_pair
+
+        aesthetic = params.get("aesthetic", "")
+        if params.get("reverse") and key is not None and not key.empty:
+            ord_ = np.arange(len(key))
+            key = key.iloc[ord_[::-1]].reset_index(drop=True)
+            # Rotate aesthetic column — R: c(ord[-1], ord[1])
+            # Drop first, append original first: yields rotated indexing
+            if aesthetic in key.columns and len(key) > 1:
+                rotated_idx = list(range(1, len(key))) + [0]
+                key[aesthetic] = key[aesthetic].iloc[rotated_idx].values
+            key[".value"] = 1.0 - key[".value"].astype(float)
+
+        params["key"] = key
+        # Title resolution (identical to Guide$extract_params)
+        title = kwargs.get("title")
+        scale_name = getattr(scale, "name", None)
+        if is_waiver(params.get("title")):
+            if title is not None and not is_waiver(title):
+                params["title"] = title
+            elif scale_name is not None:
+                params["title"] = scale_name
+        return params
+
+    # -- setup_params (guide-bins.R:226-230) ---------------------------------
+
+    @staticmethod
+    def setup_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """Force nrow/ncol/n_breaks/n_key_layers to 1.
+
+        Bins guide is single-row / single-column — it draws one strip
+        of keys along the chosen direction.
+        """
+        params = dict(params)
+        params["nrow"] = 1
+        params["ncol"] = 1
+        params["n_breaks"] = 1
+        params["n_key_layers"] = 1
+        return params
+
+    # -- setup_elements (guide-bins.R:232-259) -------------------------------
+
+    def setup_elements(
+        self,
+        params: Dict[str, Any],
+        elements: Optional[Dict[str, str]] = None,
+        theme: Any = None,
+    ) -> Dict[str, Any]:
+        """Populate text_position / axis line / tick defaults.
+
+        Validates that ``legend.text.position`` agrees with
+        ``params["direction"]`` — horizontal direction must use top /
+        bottom, vertical must use left / right.
+        """
+        if elements is None:
+            elements = dict(self.elements)
+        direction = params.get("direction") or "horizontal"
+        valid_position = {
+            "horizontal": ["bottom", "top"],
+            "vertical": ["right", "left"],
+        }.get(direction, ["bottom", "top"])
+
+        # R: replace_null(theme, legend.text.position, axis_line, ticks)
+        if isinstance(theme, dict):
+            theme = dict(theme)
+            if theme.get("legend.text.position") is None:
+                theme["legend.text.position"] = valid_position[0]
+
+        # Let the parent resolve; then validate text_position
+        elems = super().setup_elements(params, elements, theme)
+
+        tp = elems.get("text_position") if isinstance(elems, dict) else None
+        if tp is not None and tp not in valid_position:
+            cli_abort(
+                f"When `direction` is {direction!r}, `legend.text.position` "
+                f"must be one of {valid_position!r}, not {tp!r}."
+            )
+        return elems
+
+    # -- build_labels (guide-bins.R:261-280) ---------------------------------
+
+    @staticmethod
+    def build_labels(
+        key: pd.DataFrame,
+        elements: Dict[str, Any],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build label grobs; blanks out non-limit ends per show.limits.
+
+        Returns a dict with a ``labels`` entry so downstream callers can
+        treat label output uniformly.
+        """
+        if key is None or len(key) == 0:
+            return {"labels": None}
+        n_labels = len(key[".label"]) if ".label" in key.columns else 0
+        if n_labels < 1:
+            return {"labels": None}
+
+        labels = key[".label"].astype(object).tolist()
+        show_limits = params.get("show.limits", [True, True])
+        if isinstance(show_limits, bool):
+            show_limits = [show_limits, show_limits]
+        # R: key$.label[c(1, n_labels)[!params$show.limits]] <- ""
+        if n_labels >= 1 and not show_limits[0]:
+            labels[0] = ""
+        if n_labels >= 1 and not show_limits[-1]:
+            labels[-1] = ""
+
+        values = key[".value"].astype(float).to_numpy()
+        if params.get("direction") == "vertical":
+            values = 1.0 - values
+        return {
+            "labels": {"text": labels, "x": values,
+                       "flip": params.get("direction") == "vertical"},
+        }
+
+    # -- build_ticks (guide-bins.R:282-288) ----------------------------------
+
+    @staticmethod
+    def build_ticks(
+        key: pd.DataFrame,
+        elements: Dict[str, Any],
+        params: Dict[str, Any],
+        position: Any = None,
+    ) -> Dict[str, Any]:
+        """Build tick mark specs; NA out non-limit ends per show.limits.
+
+        Delegates to :meth:`Guide.build_ticks`. Returns the value array
+        used by the downstream tick drawer.
+        """
+        if key is None or len(key) == 0:
+            return {"ticks": None}
+        values = key[".value"].astype(float).to_numpy().copy()
+        if params.get("direction") == "vertical":
+            values = 1.0 - values
+        show_limits = params.get("show.limits", [True, True])
+        if isinstance(show_limits, bool):
+            show_limits = [show_limits, show_limits]
+        if len(values) >= 1 and not show_limits[0]:
+            values[0] = np.nan
+        if len(values) >= 1 and not show_limits[-1]:
+            values[-1] = np.nan
+        return {"ticks": values}
+
+    # -- build_decor (guide-bins.R:290-331) ----------------------------------
+
+    @staticmethod
+    def build_decor(
+        decor: Any,
+        grobs: Any,
+        elements: Dict[str, Any],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Assemble key strip + axis line + tick marks.
+
+        Delegates key building to :meth:`GuideLegend.build_decor` (or
+        the imperative legend helpers in :mod:`ggplot2_py.guide_legend`
+        when they exist) and positions an axis line alongside based on
+        ``text_position``.
+
+        Returns
+        -------
+        dict
+            ``{"keys": gtable-like, "axis_line": spec, "ticks": ticks}``.
+        """
+        n_keys = (len(params["key"]) - 1) if params.get("key") is not None \
+            and len(params["key"]) > 0 else 0
+        params = dict(params)
+        params["n_breaks"] = n_keys
+
+        # Delegate key-strip to parent build_decor if available
+        keys_grob = None
+        parent_build = getattr(GuideLegend, "build_decor", None)
+        if parent_build is not None:
+            keys_grob = parent_build(decor, grobs, elements, params)
+
+        # Axis line position: determined by text_position
+        tp = elements.get("text_position") if isinstance(elements, dict) else None
+        axis_spec = {
+            "top":    {"x": [0.0, 1.0], "y": [1.0, 1.0]},
+            "bottom": {"x": [0.0, 1.0], "y": [0.0, 0.0]},
+            "left":   {"x": [0.0, 0.0], "y": [0.0, 1.0]},
+            "right":  {"x": [1.0, 1.0], "y": [0.0, 1.0]},
+        }.get(tp, {"x": [0.0, 1.0], "y": [0.0, 0.0]})
+
+        ticks = grobs.get("ticks") if isinstance(grobs, dict) else None
+        return {"keys": keys_grob, "axis_line": axis_spec, "ticks": ticks}
+
+    # -- measure_grobs (guide-bins.R:333-339) --------------------------------
+
+    @staticmethod
+    def measure_grobs(
+        grobs: Dict[str, Any],
+        params: Dict[str, Any],
+        elements: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Compute key-strip widths / heights (in cm).
+
+        Mirrors R's: sums the decor key sizes, then delegates to
+        :meth:`GuideLegend.measure_grobs` for overall measurement.
+        """
+        decor = grobs.get("decor") if isinstance(grobs, dict) else None
+        params = dict(params)
+        if isinstance(decor, dict):
+            keys = decor.get("keys")
+        else:
+            keys = None
+        from ggplot2_py._utils import width_cm, height_cm
+        try:
+            w = float(np.sum(width_cm(keys))) if keys is not None else 0.0
+        except (TypeError, ValueError):
+            w = 0.0
+        try:
+            h = float(np.sum(height_cm(keys))) if keys is not None else 0.0
+        except (TypeError, ValueError):
+            h = 0.0
+        params["sizes"] = {"widths": w, "heights": h}
+
+        parent_measure = getattr(GuideLegend, "measure_grobs", None)
+        if parent_measure is not None and parent_measure is not Guide.measure_grobs:
+            return parent_measure(grobs, params, elements)
+        return {"width": w, "height": h}
 
 
 # ============================================================================
@@ -1413,7 +2315,9 @@ class GuideCustom(Guide):
 class GuideAxisLogticks(GuideAxis):
     """Axis guide with logarithmic tick marks.
 
-    Replaces standard tick placement with ticks at log10-spaced intervals.
+    Replaces standard tick placement with ticks at log10-spaced
+    intervals (decade subdivisions).  R source:
+    ``ggplot2/R/guide-axis-logticks.R``.
 
     Attributes
     ----------
@@ -1425,17 +2329,259 @@ class GuideAxisLogticks(GuideAxis):
 
     params: Dict[str, Any] = {
         **GuideAxis.params,
+        # Defaults mirror R's GuideAxisLogticks$params (guide-axis-logticks.R:153-165)
+        "prescale_base": None,
+        "negative_small": 0.1,
+        "minor.ticks": True,  # for spacing calculation
         "long": 2.25,
         "mid": 1.5,
         "short": 0.75,
-        "prescale.base": None,
-        "negative.small": None,
-        "short.theme": None,
         "expanded": True,
+        "short_theme": None,
         "name": "axis_logticks",
     }
 
     available_aes: List[str] = ["x", "y"]
+
+    # -- extract_params (guide-axis-logticks.R:168-215) ----------------------
+
+    @staticmethod
+    def extract_params(
+        scale: Any,
+        params: Dict[str, Any],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Build a log-tick shadow key.
+
+        For a log-scaled axis, computes tick positions at
+        ``1, 2, ..., 9 * 10^k``, reconstructs their type (major = 1,
+        mid = 2, short = 3) and stashes the result in
+        ``params["logkey"]``.  Also adjusts cap positions if ``cap`` is
+        set, and appends the aesthetic to the guide name.
+
+        Parameters
+        ----------
+        scale : Scale
+            Trained continuous (usually log-transformed) scale.
+        params : dict
+            Current parameters.
+        **kwargs : Any
+            Accepts ``title``.
+
+        Returns
+        -------
+        dict
+            Parameters with added ``logkey`` and updated ``name``.
+        """
+        if getattr(scale, "is_discrete", lambda: False)():
+            cli_abort("Cannot calculate logarithmic ticks for discrete scales.")
+
+        aesthetic = params.get("aesthetic", "x")
+        params = dict(params)
+        params["name"] = f"{params.get('name', 'axis_logticks')}_{aesthetic}"
+
+        get_trans = getattr(scale, "get_transformation",
+                            lambda: _IdentityTrans())
+        prescale_base = params.get("prescale_base") or params.get("prescale.base")
+        if prescale_base is not None:
+            trans_name = getattr(get_trans(), "name", "identity")
+            if trans_name != "identity":
+                cli_warn(
+                    f"The `prescale.base` argument will override the scale's "
+                    f"`{trans_name}` transformation in log-tick positioning."
+                )
+            from scales import transform_log
+            transformation = transform_log(base=prescale_base)
+        else:
+            transformation = get_trans()
+
+        # Reconstruct original range: transformation$inverse(scale$get_limits())
+        scale_limits = getattr(scale, "get_limits", lambda: (1.0, 10.0))()
+        try:
+            limits = transformation.inverse(np.asarray(scale_limits, dtype=float))
+        except (AttributeError, TypeError):
+            limits = np.asarray(scale_limits, dtype=float)
+
+        negative_small = (params.get("negative_small")
+                          or params.get("negative.small"))
+        from scales import minor_breaks_log as _mbl
+        ticks_fn = _mbl(smallest=negative_small)
+        ticks = np.asarray(ticks_fn(np.asarray(limits, dtype=float)),
+                           dtype=float)
+        # Classify tick type (1 = major, 2 = mid, 3 = short) based on the
+        # leading digit of |tick|/10^floor(log10(|tick|)).
+        # R stores `attr(ticks, 'detail')` as c(10, 5, 1) indices; we
+        # reproduce via abs-magnitude.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            exps = np.floor(np.log10(np.where(ticks > 0, ticks, np.nan)))
+            leading = ticks / np.power(10.0, exps)
+        tick_type = np.full(len(ticks), 3, dtype=int)  # short
+        tick_type[np.isclose(leading, 5.0, atol=1e-6)] = 2  # mid
+        tick_type[np.isclose(leading, 1.0, atol=1e-6)] = 1  # major
+
+        # Transform back into axis space
+        try:
+            ticks_axis = transformation.transform(ticks)
+        except (AttributeError, TypeError):
+            ticks_axis = ticks
+
+        logkey = pd.DataFrame({
+            aesthetic: ticks_axis,
+            ".type": tick_type,
+        })
+
+        # Discard out-of-bounds ticks using expanded or literal range
+        if params.get("expanded", True):
+            range_ = getattr(scale, "continuous_range", None) \
+                or getattr(scale, "get_limits", lambda: (-np.inf, np.inf))()
+        else:
+            range_ = getattr(scale, "get_limits", lambda: (-np.inf, np.inf))()
+        r0, r1 = float(range_[0]), float(range_[1])
+        mask = (logkey[aesthetic] >= r0) & (logkey[aesthetic] <= r1)
+        logkey = logkey.loc[mask].reset_index(drop=True)
+
+        # Cap adjustment
+        decor = params.get("decor")
+        cap = params.get("cap", "none")
+        if cap in ("both", "upper") and decor is not None and not logkey.empty \
+                and aesthetic in decor.columns and len(decor) >= 2:
+            decor = decor.copy()
+            decor.iloc[1, decor.columns.get_loc(aesthetic)] = \
+                float(logkey[aesthetic].max())
+            params["decor"] = decor
+        if cap in ("both", "lower") and decor is not None and not logkey.empty \
+                and aesthetic in decor.columns and len(decor) >= 1:
+            decor = decor.copy() if not decor.flags.writeable else decor
+            decor.iloc[0, decor.columns.get_loc(aesthetic)] = \
+                float(logkey[aesthetic].min())
+            params["decor"] = decor
+
+        params["logkey"] = logkey
+
+        # Title (parent behaviour)
+        title = kwargs.get("title")
+        scale_name = getattr(scale, "name", None)
+        if is_waiver(params.get("title")):
+            if title is not None and not is_waiver(title):
+                params["title"] = title
+            elif scale_name is not None:
+                params["title"] = scale_name
+        return params
+
+    # -- transform (guide-axis-logticks.R:217-222) ---------------------------
+
+    @staticmethod
+    def transform(
+        params: Dict[str, Any],
+        coord: Any,
+        panel_params: Any = None,
+    ) -> Dict[str, Any]:
+        """Transform both the standard key and the logkey shadow.
+
+        The logkey requires the same coord transform as the main key so
+        that tick x/y coordinates line up with the data space.
+        """
+        params = GuideAxis.transform(params, coord, panel_params)
+        logkey = params.get("logkey")
+        if logkey is not None and not logkey.empty and hasattr(coord, "transform"):
+            aesthetic = params.get("aesthetic", "x")
+            ortho = "y" if aesthetic == "x" else "x"
+            position = params.get("position")
+            override = -np.inf if position in ("bottom", "left") else np.inf
+            if ortho not in logkey.columns:
+                logkey = logkey.copy()
+                logkey[ortho] = override
+            params["logkey"] = coord.transform(logkey, panel_params)
+        return params
+
+    # -- override_elements (guide-axis-logticks.R:224-242) -------------------
+
+    @staticmethod
+    def override_elements(
+        params: Dict[str, Any],
+        elements: Dict[str, Any],
+        theme: Any,
+    ) -> Dict[str, Any]:
+        """Resolve three tick lengths (long / mid / short).
+
+        Multiplies ``rel()`` values by the theme's
+        ``axis.ticks.length``; fixed :class:`~grid_py.Unit` values pass
+        through untouched.  Records ``major_length`` / ``minor_length``
+        so the legend-spacing calculation still works.
+        """
+        elements = GuideAxis.override_elements(params, elements, theme)
+        if not isinstance(elements, dict):
+            elements = dict(elements) if elements is not None else {}
+        major_length = elements.get("major_length", 1.0)
+        # Inherit short ticks from minor ticks element
+        elements["short"] = params.get("short_theme") or elements.get("minor")
+        # Multiply rel units with theme's tick length
+        lengths: Dict[str, Any] = {}
+        for key in ("long", "mid", "short"):
+            val = params.get(key)
+            if val is None:
+                continue
+            # Is this a unit object (has a value + type) or a bare number?
+            is_unit = hasattr(val, "value") and hasattr(val, "units")
+            if is_unit:
+                lengths[key] = val
+            else:
+                try:
+                    lengths[key] = float(val) * float(major_length)
+                except (TypeError, ValueError):
+                    lengths[key] = major_length
+        elements["tick_length"] = lengths
+        numeric_lengths = [v for v in lengths.values()
+                           if isinstance(v, (int, float, np.integer, np.floating))]
+        if numeric_lengths:
+            elements["major_length"] = float(max(numeric_lengths))
+            elements["minor_length"] = float(min(numeric_lengths))
+        return elements
+
+    # -- build_ticks (guide-axis-logticks.R:244-265) -------------------------
+
+    @staticmethod
+    def build_ticks(
+        key: pd.DataFrame,
+        elements: Dict[str, Any],
+        params: Dict[str, Any],
+        position: Any = None,
+    ) -> Dict[str, Any]:
+        """Build three tick-length groups from the logkey.
+
+        Returns a dict with separate ``long``, ``mid``, ``short`` keys —
+        each a subset of the logkey filtered by ``.type``. The render
+        pipeline draws them at the corresponding length.
+        """
+        logkey = params.get("logkey")
+        if logkey is None or logkey.empty:
+            return {"long": None, "mid": None, "short": None}
+        if position is None:
+            position = params.get("opposite") or params.get("position")
+        tick_lengths = elements.get("tick_length", {}) if isinstance(elements, dict) else {}
+        long = logkey.loc[logkey[".type"] == 1].reset_index(drop=True)
+        mid = logkey.loc[logkey[".type"] == 2].reset_index(drop=True)
+        short = logkey.loc[logkey[".type"] == 3].reset_index(drop=True)
+        return {
+            "long": {"key": long, "length": tick_lengths.get("long")},
+            "mid":  {"key": mid,  "length": tick_lengths.get("mid")},
+            "short":{"key": short, "length": tick_lengths.get("short")},
+        }
+
+
+class _IdentityTrans:
+    """Lightweight identity transformation used when a scale is
+    missing :meth:`get_transformation` or it returns ``None``."""
+
+    name = "identity"
+
+    @staticmethod
+    def transform(x: np.ndarray) -> np.ndarray:
+        return np.asarray(x, dtype=float)
+
+    @staticmethod
+    def inverse(x: np.ndarray) -> np.ndarray:
+        return np.asarray(x, dtype=float)
 
 
 # ============================================================================
@@ -1444,6 +2590,8 @@ class GuideAxisLogticks(GuideAxis):
 
 class GuideAxisStack(GuideAxis):
     """Stacked axis guide combining multiple axis guides.
+
+    R source: ``ggplot2/R/guide-axis-stack.R``.
 
     Attributes
     ----------
@@ -1468,6 +2616,182 @@ class GuideAxisStack(GuideAxis):
     }
 
     available_aes: List[str] = ["x", "y", "theta", "r"]
+
+    # hashables: title, class-names of child guides, name
+    hashables: List[str] = ["title", "guides", "name"]
+
+    # -- train (guide-axis-stack.R:108-123) ----------------------------------
+
+    def train(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        scale: Any = None,
+        aesthetic: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Train each child guide on the shared scale / aesthetic.
+
+        Position / angle are propagated from the stack's own parameters
+        so children inherit them when they don't set an override.
+        """
+        if params is None:
+            params = dict(self.params)
+        position = params.get("position")
+        valid = list(_TRBL) + ["theta", "theta.sec"]
+        if position is not None and not is_waiver(position) and position not in valid:
+            cli_abort(
+                f"`position` must be one of {valid!r}, not {position!r}."
+            )
+
+        guides = params.get("guides") or []
+        guide_params = params.get("guide_params") or []
+        while len(guide_params) < len(guides):
+            guide_params.append({})
+        stack_angle = params.get("angle")
+
+        for i, child in enumerate(guides):
+            child_params = dict(guide_params[i])
+            if position is not None:
+                child_params["position"] = position
+            # R: params$guide_params[[i]]$angle <- angle %|W|% stack_angle
+            child_angle = child_params.get("angle")
+            if child_angle is None or is_waiver(child_angle):
+                child_params["angle"] = stack_angle
+            trained = child.train(
+                params=child_params,
+                scale=scale,
+                aesthetic=aesthetic,
+                **kwargs,
+            )
+            guide_params[i] = trained if trained is not None else child_params
+
+        params["guide_params"] = guide_params
+        return params
+
+    # -- transform (guide-axis-stack.R:125-134) ------------------------------
+
+    @staticmethod
+    def transform(
+        params: Dict[str, Any],
+        coord: Any,
+        panel_params: Any = None,
+    ) -> Dict[str, Any]:
+        """Propagate :meth:`transform` to each child guide."""
+        params = dict(params)
+        guides = params.get("guides") or []
+        guide_params = params.get("guide_params") or []
+        for i, child in enumerate(guides):
+            if i >= len(guide_params):
+                break
+            transformed = child.transform(
+                params=guide_params[i],
+                coord=coord,
+                panel_params=panel_params,
+            )
+            guide_params[i] = transformed
+        params["guide_params"] = guide_params
+        return params
+
+    # -- get_layer_key (guide-axis-stack.R:137-145) --------------------------
+
+    def get_layer_key(
+        self,
+        params: Dict[str, Any],
+        layers: List[Any],
+        data: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """Forward get_layer_key to every child guide."""
+        params = dict(params)
+        guides = params.get("guides") or []
+        guide_params = params.get("guide_params") or []
+        for i, child in enumerate(guides):
+            if i >= len(guide_params):
+                break
+            guide_params[i] = child.get_layer_key(
+                params=guide_params[i],
+                layers=layers,
+                data=data,
+            )
+        params["guide_params"] = guide_params
+        return params
+
+    # -- draw (guide-axis-stack.R:147-253) -----------------------------------
+
+    def draw(
+        self,
+        theme: Any = None,
+        position: Optional[str] = None,
+        direction: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Stack each child guide's drawing along the axis direction.
+
+        For Cartesian positions (top/right/bottom/left) the children
+        are placed in a gtable with the stack's spacing between them;
+        for theta positions each child accumulates a radial offset.
+        Returns ``None`` if every child produced an empty grob.
+        """
+        if params is None:
+            params = dict(self.params)
+        pos = params.get("position") or position
+        dir_ = params.get("direction") or direction
+        draw_label = params.get("draw_label", True)
+        guides = params.get("guides") or []
+        guide_params = params.get("guide_params") or []
+        idx_range = range(len(guides)) if draw_label else range(min(1, len(guides)))
+
+        # Default spacing: axis.ticks.length from theme when not provided
+        spacing = params.get("spacing")
+
+        # Theta-style stacking
+        if pos in ("theta", "theta.sec"):
+            grobs: List[Any] = []
+            offset = 0.0
+            default_spacing_cm = spacing if spacing is not None else 0.079  # 2.25pt
+            for i in idx_range:
+                pars = dict(guide_params[i])
+                pars["stack_offset"] = offset
+                grob_i = guides[i].draw(
+                    theme=theme, position=pos, direction=dir_, params=pars,
+                )
+                grobs.append(grob_i)
+                if grob_i is not None and hasattr(grob_i, "offset"):
+                    offset += float(default_spacing_cm) + float(grob_i.offset)
+            return {"children": grobs, "stack": "theta"}
+
+        # Cartesian stacking
+        grobs = []
+        for i in idx_range:
+            pars = dict(guide_params[i])
+            pars["draw_label"] = draw_label
+            grobs.append(
+                guides[i].draw(
+                    theme=theme, position=pos, direction=dir_, params=pars,
+                )
+            )
+
+        # Remove empty grobs
+        def _is_zero(g: Any) -> bool:
+            return (g is None
+                    or (hasattr(g, "is_zero") and bool(g.is_zero))
+                    or (hasattr(g, "__len__") and len(g) == 0))
+        grobs = [g for g in grobs if not _is_zero(g)]
+        if not grobs:
+            return None
+
+        # For Cartesian stack: along-axis dimension is rows for top/bottom,
+        # cols for left/right
+        if pos in ("top", "left"):
+            grobs = list(reversed(grobs))
+
+        layout = "rows" if pos in ("top", "bottom") else "cols"
+        return {
+            "children": grobs,
+            "stack": "cartesian",
+            "position": pos,
+            "layout": layout,
+            "spacing": spacing,
+        }
 
 
 # ============================================================================

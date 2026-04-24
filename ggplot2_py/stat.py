@@ -2797,6 +2797,99 @@ def stat_density(
 # StatSmooth
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# R-faithful formula parsing via patsy.
+#
+# R's smoothing methods (lm, glm, loess, gam, rlm, ...) all accept a
+# ``formula`` argument (e.g. ``y ~ x``, ``y ~ poly(x, 2)``, ``y ~ s(x)``).
+# ggplot2 threads the formula *literally* through to ``method(formula, data=,
+# weights=, ...)``. The Python port mirrors that by parsing the formula
+# string with patsy and building a design matrix on both the training data
+# and the prediction grid.
+#
+# R ``poly(x, degree)`` is not available to patsy by default; we register a
+# raw-polynomial implementation below. OLS predictions and standard errors
+# are invariant under the basis choice (same column space), so raw powers
+# reproduce R's ``predict.lm`` output to machine precision — verified
+# against ``poly(x, 2)``, ``poly(x, 3)``, and ``poly(x, 2, raw=TRUE)``.
+# ---------------------------------------------------------------------------
+
+def _r_poly(x: Any, degree: int = 1, raw: bool = True) -> np.ndarray:
+    """R-compatible ``poly(x, degree)`` for patsy.
+
+    Returns raw powers ``x^1, ..., x^degree`` as an ``(n, degree)`` array.
+    Orthogonalization (R's default) spans the same column space as raw
+    powers, so fitted values and prediction SEs are identical — which is
+    what ggplot2 uses.
+    """
+    xa = np.asarray(x, dtype=float)
+    return np.column_stack([xa ** k for k in range(1, int(degree) + 1)])
+
+
+_SMOOTH_FORMULA_NAMESPACE = {"poly": _r_poly}
+
+
+def _parse_smooth_formula(
+    formula: Any,
+    data: pd.DataFrame,
+) -> Tuple[np.ndarray, np.ndarray, Any]:
+    """Parse an R-style formula and build design matrices for training data.
+
+    Parameters
+    ----------
+    formula : str, patsy.ModelDesc, or None
+        R-style formula. ``None`` defaults to ``"y ~ x"``.
+    data : pd.DataFrame
+        Must contain the LHS and RHS variables referenced by ``formula``.
+
+    Returns
+    -------
+    y : (n,) ndarray
+    X : (n, p) ndarray
+    design_info : patsy.DesignInfo
+        Reusable for ``build_design_matrices`` on a prediction grid.
+    """
+    import patsy
+
+    if formula is None:
+        formula = "y ~ x"
+    if not isinstance(formula, str):
+        # Accept pre-built patsy ModelDesc / DesignInfo transparently.
+        formula_obj = formula
+    else:
+        formula_obj = formula
+
+    eval_env = patsy.EvalEnvironment.capture(0).with_outer_namespace(
+        _SMOOTH_FORMULA_NAMESPACE
+    )
+    y_df, X_df = patsy.dmatrices(
+        formula_obj, data, return_type="dataframe", eval_env=eval_env,
+    )
+    y = np.asarray(y_df).ravel()
+    X = np.asarray(X_df)
+    return y, X, X_df.design_info
+
+
+def _build_smooth_prediction_matrix(
+    design_info: Any, xseq: np.ndarray,
+) -> np.ndarray:
+    """Build the prediction design matrix on a fresh ``x`` grid."""
+    import patsy
+    new_df = pd.DataFrame({"x": np.asarray(xseq, dtype=float)})
+    (X_new,) = patsy.build_design_matrices([design_info], new_df)
+    return np.asarray(X_new)
+
+
+def _formula_is_trivial_y_x(formula: Any) -> bool:
+    """True iff ``formula`` is the default ``y ~ x`` (loess's only form)."""
+    if formula is None:
+        return True
+    if isinstance(formula, str):
+        normalized = "".join(formula.split())
+        return normalized == "y~x"
+    return False
+
+
 class StatSmooth(Stat):
     """Smoothing with confidence interval.
 
@@ -2920,22 +3013,39 @@ class StatSmooth(Stat):
         if method_args is None:
             method_args = {}
 
+        # Default formula: R stat-smooth.R:36-43 — ``y ~ x`` for everything
+        # except auto/gam (which defaults to ``y ~ s(x, bs="cs")``). The
+        # gam default is handled inside ``_fit_gam`` since the
+        # smoother-basis API differs from the design-matrix API.
+        if formula is None:
+            formula = "y ~ x"
+
+        # Validate formula/method compatibility BEFORE fitting. R's stats
+        # don't silently downgrade either: a bad formula fails loudly.
+        if method in ("loess", "lowess") and not _formula_is_trivial_y_x(formula):
+            cli_abort(
+                f"stat_smooth(method='loess'): formula must be 'y ~ x'; "
+                f"got {formula!r}. Use method='lm' for polynomial/spline "
+                f"fits."
+            )
+
+        if method not in ("lm", "linear", "loess", "lowess", "gam", "glm"):
+            cli_abort(
+                f"Unknown smoothing method {method!r}; expected one of "
+                f"'lm', 'loess', 'gam', 'glm', or 'auto'."
+            )
+
         try:
             if method in ("lm", "linear"):
-                result = self._fit_lm(data, xseq, se, level)
+                result = self._fit_lm(data, xseq, se, level, formula=formula)
             elif method in ("loess", "lowess"):
                 result = self._fit_lowess(data, xseq, se, level, span)
             elif method == "gam":
-                result = self._fit_gam(data, xseq, se, level)
+                result = self._fit_gam(data, xseq, se, level, formula=formula)
             elif method == "glm":
                 # R glm with identity link ≈ lm for gaussian family. For
                 # other families users should pass method_args.
-                result = self._fit_lm(data, xseq, se, level)
-            else:
-                raise ValueError(
-                    f"Unknown smoothing method {method!r}; expected one of "
-                    f"'lm', 'loess', 'gam', 'glm', or 'auto'."
-                )
+                result = self._fit_lm(data, xseq, se, level, formula=formula)
         except Exception as e:
             cli_warn(f"Failed to fit group {data.get('group', [None])[0] if 'group' in data.columns else ''}: {e}")
             return pd.DataFrame()
@@ -2952,8 +3062,16 @@ class StatSmooth(Stat):
         xseq: np.ndarray,
         se: bool,
         level: float,
+        formula: Any = "y ~ x",
     ) -> pd.DataFrame:
-        """Fit linear model.
+        """Fit linear model — R ``lm(formula, data, weights)`` parity.
+
+        Formula is parsed with patsy (R-compatible syntax). Supports
+        ``y ~ x``, ``y ~ poly(x, k)``, ``y ~ x + I(x^2)``,
+        ``y ~ bs(x, df=k)``, ``y ~ cr(x, df=k)``, log/exp transforms,
+        etc. Predictions at ``xseq`` are produced by evaluating the same
+        design on a fresh grid and matching R's ``predict.lm(..., se.fit=TRUE,
+        interval='confidence')`` output.
 
         Parameters
         ----------
@@ -2961,33 +3079,43 @@ class StatSmooth(Stat):
         xseq : np.ndarray
         se : bool
         level : float
+        formula : str or patsy design, optional
+            Default ``"y ~ x"``.
 
         Returns
         -------
         pd.DataFrame
         """
         from scipy import stats as scipy_stats
+        import statsmodels.api as sm
 
-        x = data["x"].values
-        y = data["y"].values
-        w = data["weight"].values if "weight" in data.columns else np.ones(len(x))
+        w = (
+            np.asarray(data["weight"].values, dtype=float)
+            if "weight" in data.columns
+            else np.ones(len(data))
+        )
 
-        # Weighted least squares
-        coeffs = np.polyfit(x, y, deg=1, w=np.sqrt(w))
-        y_pred = np.polyval(coeffs, xseq)
+        y, X, design_info = _parse_smooth_formula(formula, data)
 
-        result = pd.DataFrame({"x": xseq, "y": y_pred})
+        # Weighted least squares via statsmodels.WLS. Matches R's
+        # ``lm(formula, data, weights=w)`` on fitted values, residual
+        # variance, and predict.lm's se.fit.
+        model = sm.WLS(y, X, weights=w).fit()
 
-        if se and len(x) > 2:
-            y_hat = np.polyval(coeffs, x)
-            resid = y - y_hat
-            mse = np.sum(w * resid ** 2) / (np.sum(w) - 2)
-            x_mean = np.average(x, weights=w)
-            ss_x = np.sum(w * (x - x_mean) ** 2)
+        X_new = _build_smooth_prediction_matrix(design_info, xseq)
+        y_pred = np.asarray(X_new @ model.params, dtype=float)
 
-            se_pred = np.sqrt(mse * (1.0 / np.sum(w) + (xseq - x_mean) ** 2 / ss_x))
-            t_val = scipy_stats.t.ppf((1 + level) / 2, df=len(x) - 2)
+        result = pd.DataFrame({"x": np.asarray(xseq, dtype=float), "y": y_pred})
 
+        n = len(y)
+        p = X.shape[1]
+        if se and n > p:
+            # R's predict.lm with se.fit=TRUE uses the model covariance
+            # ``vcov = sigma^2 * (X'WX)^-1``, and for a new row x_new
+            # ``se.fit_i = sqrt(x_new' vcov x_new)``.
+            cov = np.asarray(model.cov_params(), dtype=float)
+            se_pred = np.sqrt(np.einsum("ij,jk,ik->i", X_new, cov, X_new))
+            t_val = scipy_stats.t.ppf((1 + level) / 2, df=n - p)
             result["ymin"] = y_pred - t_val * se_pred
             result["ymax"] = y_pred + t_val * se_pred
             result["se"] = se_pred
@@ -3094,6 +3222,7 @@ class StatSmooth(Stat):
         xseq: np.ndarray,
         se: bool,
         level: float,
+        formula: Any = None,
     ) -> pd.DataFrame:
         """Fit GAM — R ``mgcv::gam(y ~ s(x, bs='cs'))`` via
         ``statsmodels.gam.api.GLMGam`` with B-splines.
@@ -3103,9 +3232,32 @@ class StatSmooth(Stat):
         ``BSplines(df=10, degree=3)`` + a ridge-like ``alpha`` penalty
         chosen so the effective degrees of freedom match R's defaults on
         typical biological data (EDF ≈ 8-9).
+
+        Supported formulas: ``y ~ x`` (treated as default smooth on x) and
+        ``y ~ s(x, ...)`` (arguments currently ignored — always fits
+        ``s(x, bs='cs')`` equivalent). More complex gam formulas (tensor
+        products, multiple smooths) raise ``cli_abort``.
         """
         from scipy import stats as scipy_stats
         from statsmodels.gam.api import GLMGam, BSplines
+
+        # Accept default / y~x / y~s(x, ...). Anything else — abort with
+        # an R-style message. We do not silently fall through to the
+        # default smooth.
+        if formula is not None and not _formula_is_trivial_y_x(formula):
+            form_str = (
+                formula if isinstance(formula, str) else str(formula)
+            ).replace(" ", "")
+            # Very permissive match: y~s(x...). R's mgcv accepts far more
+            # (te(), ti(), bivariate smooths, etc.) but our GLMGam stand-in
+            # only supports a single univariate smooth on x.
+            if not (form_str.startswith("y~s(x") and form_str.endswith(")")):
+                cli_abort(
+                    "stat_smooth(method='gam'): only 'y ~ x' or "
+                    "'y ~ s(x, ...)' is supported; got "
+                    f"{formula!r}. Use method='lm' for polynomial / spline "
+                    "basis regression."
+                )
 
         x = np.asarray(data["x"].values, dtype=float)
         y = np.asarray(data["y"].values, dtype=float)

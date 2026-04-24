@@ -1351,8 +1351,27 @@ class ScaleBinned(Scale):
         # Rescale breaks
         breaks_resc = self.rescale(all_breaks, limits)
         if len(breaks_resc) > 1:
-            bins = np.digitize(self.rescale(x_arr, limits), breaks_resc, right=not self.right)
-            bins = np.clip(bins, 1, len(breaks_resc) - 1)
+            # Mirror R's cut(x, breaks, include.lowest=TRUE, right=self$right, labels=FALSE):
+            # right-closed intervals (a, b] with the first interval also including its
+            # left endpoint (or mirrored for right=FALSE).  ``np.digitize`` cannot
+            # express the ``include.lowest`` rule, so delegate to ``pd.cut`` which
+            # matches R's semantics exactly.  Codes are 0-based (or -1 for NA);
+            # shift to 1-based so downstream palette indexing with ``bins - 1``
+            # remains correct.
+            x_resc = np.asarray(self.rescale(x_arr, limits), dtype=float)
+            unique_breaks = np.unique(breaks_resc)
+            codes = pd.cut(
+                x_resc,
+                unique_breaks,
+                labels=False,
+                include_lowest=True,
+                right=self.right,
+            )
+            codes_arr = np.asarray(codes, dtype=float)
+            # Values outside the break range → NaN; assign bin 1 temporarily so
+            # palette lookup stays in-bounds, then mask via the final NaN check.
+            out_of_range = np.isnan(codes_arr)
+            bins = np.where(out_of_range, 0, codes_arr).astype(int) + 1
             midpoints = breaks_resc[:-1] + np.diff(breaks_resc) / 2.0
 
             if self.palette_cache is not None:
@@ -1369,9 +1388,11 @@ class ScaleBinned(Scale):
             # np.isnan doesn't work on object arrays (e.g. colour strings)
             if scaled.dtype.kind in ("U", "S", "O"):
                 na_mask = np.array([v is None or (isinstance(v, float) and np.isnan(v))
-                                    for v in scaled])
+                                    for v in scaled]) | out_of_range
+                scaled = scaled.astype(object)
                 scaled[na_mask] = self.na_value
                 return scaled
+            scaled = np.where(out_of_range, np.nan, scaled)
             return np.where(~np.isnan(scaled), scaled, self.na_value)
         else:
             return np.full_like(x_arr, self.na_value)
@@ -1668,9 +1689,24 @@ class ScaleBinnedPosition(ScaleBinned):
 
         x_oob = np.asarray(self.oob(x_arr, range=limits), dtype=float)
         x_oob = np.where(~np.isnan(x_oob), x_oob, self.na_value)
-        bins = np.digitize(x_oob, all_breaks, right=not self.right)
-        bins = np.clip(bins, 1, len(all_breaks) - 1)
-        return bins.astype(float)
+        # Mirror R's cut(x, all_breaks, include.lowest=TRUE, right=self$right, labels=FALSE)
+        # semantics.  pd.cut returns 0-based integer codes (or NaN for out-of-range);
+        # shift to 1-based integers to match R's cut().
+        unique_breaks = np.unique(all_breaks)
+        if len(unique_breaks) <= 1:
+            return np.full_like(x_oob, self.na_value)
+        codes = pd.cut(
+            x_oob,
+            unique_breaks,
+            labels=False,
+            include_lowest=True,
+            right=self.right,
+        )
+        codes_arr = np.asarray(codes, dtype=float)
+        # Out-of-range inputs are NaN; R clamps these via oob already, but preserve
+        # NaN if oob did not catch them (e.g. with custom oob functions).
+        bins = np.where(np.isnan(codes_arr), np.nan, codes_arr + 1.0)
+        return bins
 
     def reset(self) -> None:
         self.after_stat = True

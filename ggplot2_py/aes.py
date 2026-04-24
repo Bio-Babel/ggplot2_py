@@ -53,14 +53,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 AESTHETIC_ALIASES: Dict[str, str] = {
+    "col":   "colour",
     "color": "colour",
-    "pch": "shape",
-    "cex": "size",
-    "lwd": "linewidth",
-    "lty": "linetype",
-    "bg": "fill",
+    "pch":   "shape",
+    "cex":   "size",
+    "lty":   "linetype",
+    "lwd":   "linewidth",
+    "srt":   "angle",
+    "adj":   "hjust",
+    "bg":    "fill",
+    "fg":    "colour",
+    "min":   "ymin",
+    "max":   "ymax",
 }
-"""Mapping of common R aesthetic aliases to their canonical ggplot2 names."""
+"""Port of R ``ggplot_global$base_to_ggplot`` (ggplot-global.R:31-44)."""
 
 # ---------------------------------------------------------------------------
 # Helper classes for deferred / staged aesthetics
@@ -476,16 +482,20 @@ def aes(
 def _standardise_single(name: str) -> str:
     """Canonicalise a single aesthetic name.
 
-    Parameters
-    ----------
-    name : str
-        Raw aesthetic name.
+    Port of R ``standardise_aes_names`` (aes.R:180-191) — two steps:
 
-    Returns
-    -------
-    str
-        Canonical aesthetic name.
+    1. ``sub("color", "colour", x, fixed = TRUE)`` — first-occurrence
+       substring rewrite (so ``segment_color`` → ``segment_colour``,
+       ``bg.color`` → ``bg.colour``, ``color_palette`` → ``colour_palette``).
+    2. Whole-name lookup in ``ggplot_global$base_to_ggplot``
+       (:data:`AESTHETIC_ALIASES`), which maps R-style names like ``pch``,
+       ``cex``, ``srt``, ``fg`` to their ggplot2 canonical names.
     """
+    # Step 1 — R uses `sub(..., fixed = TRUE)` which replaces only the
+    # first occurrence; `str.replace(..., 1)` matches that semantics.
+    if "color" in name:
+        name = name.replace("color", "colour", 1)
+    # Step 2 — whole-name alias lookup.
     return AESTHETIC_ALIASES.get(name, name)
 
 

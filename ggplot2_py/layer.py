@@ -219,7 +219,10 @@ def _split_params(
     geom_param_names = _try_call(geom, "parameters", True) or set()
     stat_param_names = _try_call(stat, "parameters", True) or set()
 
-    params = dict(rename_aes(params)) if isinstance(params, dict) else dict(params)
+    # R ``layer.R:75`` calls ``rename_aes(params)`` once at the
+    # layer() entry point; ``layer()`` already did so before passing
+    # ``params`` here, so just normalise the dict type.
+    params = dict(params)
     aes_params: Dict[str, Any] = {}
     geom_params: Dict[str, Any] = {}
     stat_params: Dict[str, Any] = {}
@@ -838,6 +841,13 @@ def layer(
     # Ensure na_rm default
     params.setdefault("na_rm", False)
 
+    # R layer.R:75 — ``params <- rename_aes(params)`` happens once at
+    # the layer() entry, before param/aes split and the unknown-parameter
+    # check.  Both ``_split_params`` (invoked below) and the check block
+    # operate on this already-standardised dict, matching R's single-pass
+    # ordering.
+    params = dict(rename_aes(params))
+
     # Validate/resolve geom, stat, position
     if geom is None:
         geom = "blank"
@@ -912,18 +922,22 @@ def layer(
                     and k not in infra
                 ]
                 if unknown:
+                    # R layer.R:99 uses `{.arg {extra_param}}`, which renders
+                    # names backtick-quoted in plain text.
                     cli_warn(
                         "Ignoring unknown parameters: "
-                        + ", ".join(sorted(unknown))
+                        + ", ".join("`" + k + "`" for k in sorted(unknown))
                     )
             if check_aes and mapping:
                 unknown_aes = [
                     k for k in mapping if k not in known_aes
                 ]
                 if unknown_aes:
+                    # R layer.R:121 uses `{.field {extra_aes}}` — same
+                    # backtick rendering in plain text.
                     cli_warn(
                         "Ignoring unknown aesthetics: "
-                        + ", ".join(sorted(unknown_aes))
+                        + ", ".join("`" + k + "`" for k in sorted(unknown_aes))
                     )
     else:
         # Deferred: put everything into geom_params for now

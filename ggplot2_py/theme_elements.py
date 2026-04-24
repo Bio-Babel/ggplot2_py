@@ -1544,9 +1544,12 @@ def _grob_from_text(
     from grid_py._size import calc_string_metric
 
     fontsize_val = size if size is not None else (element.size if element.size is not None else 12)
-    # Use a canonical descender probe like R (margins.R:115-120: it replaces
-    # the label with descender letters to guarantee consistent height).
-    metrics = calc_string_metric("gjpqy", Gpar(
+    # Use R's exact descender probe. R ``font_descent`` (margins.R:295)
+    # runs ``grobDescent(textGrob(label = "gjpqyQ", ...))`` — the trailing
+    # ``Q`` is present in R, and omitting it here was a pure probe-string
+    # mismatch. Keep the string identical so descent values align with R
+    # even though cairo / AFM fonts render "Q" slightly differently.
+    metrics = calc_string_metric("gjpqyQ", Gpar(
         fontsize=fontsize_val,
         fontfamily=family if family is not None else element.family,
         fontface=face if face is not None else element.face,

@@ -535,8 +535,15 @@ def ggplot(
     p.coordinates.default = True
     p.facet = FacetNull()
 
-    # Set initial labels from mapping
-    p.labels = labs(**make_labels(mapping))
+    # R parity: ``plot$labels`` stores ONLY user-set labels.  The
+    # aesthetic-derived defaults (``x="carat"``, ``y="price"`` etc.)
+    # are computed lazily at render time by ``_setup_plot_labels``
+    # (mirrors R ``labels.R::make_labels`` invoked from
+    # ``ggplot_build``).  Pre-filling here would silently mask the
+    # distinction between "user wrote ``labs(x=...)``" and "label was
+    # auto-derived from aes mapping" — a divergence that surfaced when
+    # comparing ``p$labels$x`` between R and Python.
+    p.labels = Labels()
 
     set_last_plot(p)
     return p

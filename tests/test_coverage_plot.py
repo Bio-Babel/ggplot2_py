@@ -32,6 +32,7 @@ from ggplot2_py.plot import (
     _setup_plot_labels,
 )
 from ggplot2_py.aes import aes, Mapping
+from ggplot2_py.geom import geom_point
 from ggplot2_py.labels import labs, Labels
 from ggplot2_py.theme import Theme, theme
 from ggplot2_py._compat import waiver
@@ -83,8 +84,22 @@ class TestGGPlotConstructor:
         assert p.facet is not None
 
     def test_labels_from_mapping(self):
-        p = ggplot(pd.DataFrame({"x": [1]}), aes(x="x"))
-        assert "x" in p.labels
+        # R parity: ``plot$labels`` stores ONLY user-set labels at
+        # construction time; aes-derived defaults are filled at render
+        # time inside ``_setup_plot_labels``. Build first, then assert.
+        from ggplot2_py import ggplot_build
+        p = ggplot(pd.DataFrame({"x": [1], "y": [2]}), aes(x="x", y="y"))
+        assert "x" not in p.labels  # not yet auto-derived
+        built = ggplot_build(p + geom_point())
+        assert "x" in built.plot.labels  # filled by _setup_plot_labels
+
+    def test_labels_default_from_geom(self):
+        # Sanity: needs a layer for _setup_plot_labels to do anything
+        from ggplot2_py import ggplot_build
+        p = ggplot(pd.DataFrame({"x": [1], "y": [2]}), aes(x="x", y="y")) + geom_point()
+        built = ggplot_build(p)
+        assert built.plot.labels.get("x") == "x"
+        assert built.plot.labels.get("y") == "y"
 
 
 class TestGGPlotClass:

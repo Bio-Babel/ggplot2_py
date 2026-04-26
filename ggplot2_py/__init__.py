@@ -153,6 +153,10 @@ from ggplot2_py.geom import (
     GeomQuantile,
     GeomJitter,
     GeomSf,
+    GeomCustomAnn,
+    GeomLogticks,
+    GeomRasterAnn,
+    translate_shape_string,
     geom_point,
     geom_path,
     geom_line,
@@ -420,12 +424,14 @@ from ggplot2_py.scales import (
     scale_size_datetime,
     scale_radius,
     scale_shape,
+    scale_shape_continuous,
     scale_shape_discrete,
     scale_shape_binned,
     scale_shape_identity,
     scale_shape_manual,
     scale_shape_ordinal,
     scale_linetype,
+    scale_linetype_continuous,
     scale_linetype_discrete,
     scale_linetype_binned,
     scale_linetype_identity,
@@ -496,6 +502,7 @@ from ggplot2_py.facet import (
     max_height,
     max_width,
 )
+from ggplot2_py.layout import Layout
 
 # ---------------------------------------------------------------------------
 # Position adjustments
@@ -552,6 +559,14 @@ from ggplot2_py.guide import (
     guide_none,
     guides,
     is_guide,
+    is_guides,
+    new_guide,
+    old_guide,
+    guide_geom,
+    guide_train,
+    guide_merge,
+    guide_transform,
+    guide_gengrob,
 )
 
 # ---------------------------------------------------------------------------
@@ -570,6 +585,7 @@ from ggplot2_py.theme import (
     reset_theme_settings,
     update_theme,
     replace_theme,
+    from_theme,
 )
 from ggplot2_py.theme_elements import (
     Element,
@@ -585,6 +601,7 @@ from ggplot2_py.theme_elements import (
     el_def,
     merge_element,
     is_theme_element,
+    is_margin,
     Margin,
     margin,
     margin_auto,
@@ -606,6 +623,17 @@ from ggplot2_py.theme_defaults import (
     theme_classic,
     theme_void,
     theme_test,
+    theme_sub_axis,
+    theme_sub_axis_x,
+    theme_sub_axis_y,
+    theme_sub_axis_top,
+    theme_sub_axis_bottom,
+    theme_sub_axis_left,
+    theme_sub_axis_right,
+    theme_sub_legend,
+    theme_sub_panel,
+    theme_sub_plot,
+    theme_sub_strip,
 )
 
 # ---------------------------------------------------------------------------
@@ -681,6 +709,7 @@ from ggplot2_py._defaults import (
     reset_geom_defaults, reset_stat_defaults,
     get_geom_defaults,
 )
+from ggplot2_py._make_constructor import make_constructor
 # zeroGrob alias for R parity (ggplot2 imports it from grid)
 from grid_py import null_grob as zeroGrob
 
@@ -753,6 +782,9 @@ __all__ = [
     "geom_sf", "geom_sf_label", "geom_sf_text",
     "geom_qq", "geom_qq_line",
     "is_geom",
+    "GeomMap", "GeomQuantile",
+    "GeomCustomAnn", "GeomLogticks", "GeomRasterAnn",
+    "translate_shape_string",
     # Stat classes
     "Stat", "StatIdentity", "StatBin", "StatCount", "StatDensity",
     "StatSmooth", "StatBoxplot", "StatSummary", "StatSummaryBin",
@@ -810,22 +842,51 @@ __all__ = [
     "scale_color_viridis_c", "scale_color_viridis_d",
     "scale_color_grey", "scale_color_identity", "scale_color_manual",
     "scale_alpha", "scale_alpha_continuous", "scale_alpha_discrete",
+    "scale_alpha_binned", "scale_alpha_identity", "scale_alpha_manual",
+    "scale_alpha_ordinal", "scale_alpha_date", "scale_alpha_datetime",
     "scale_size", "scale_size_continuous", "scale_size_area",
-    "scale_shape", "scale_shape_discrete",
-    "scale_linetype", "scale_linetype_discrete",
-    "scale_linewidth", "scale_linewidth_continuous",
+    "scale_size_binned", "scale_size_binned_area",
+    "scale_size_discrete", "scale_size_identity", "scale_size_manual",
+    "scale_size_ordinal", "scale_size_date", "scale_size_datetime",
+    "scale_radius",
+    "scale_shape", "scale_shape_continuous", "scale_shape_discrete",
+    "scale_shape_binned", "scale_shape_identity", "scale_shape_manual",
+    "scale_shape_ordinal",
+    "scale_linetype", "scale_linetype_continuous", "scale_linetype_discrete",
+    "scale_linetype_binned", "scale_linetype_identity", "scale_linetype_manual",
+    "scale_linewidth", "scale_linewidth_continuous", "scale_linewidth_discrete",
+    "scale_linewidth_binned", "scale_linewidth_identity", "scale_linewidth_manual",
+    "scale_linewidth_ordinal",
+    "scale_linewidth_date", "scale_linewidth_datetime",
     "scale_stroke", "scale_stroke_continuous",
+    # Binned / stepped / fermenter / distiller / ordinal / date colour & fill scales
+    "scale_colour_binned", "scale_colour_distiller", "scale_colour_fermenter",
+    "scale_colour_ordinal", "scale_colour_steps", "scale_colour_steps2",
+    "scale_colour_stepsn", "scale_colour_viridis_b",
+    "scale_colour_date", "scale_colour_datetime",
+    "scale_color_binned", "scale_color_distiller", "scale_color_fermenter",
+    "scale_color_ordinal", "scale_color_steps", "scale_color_steps2",
+    "scale_color_stepsn", "scale_color_viridis_b",
+    "scale_color_date", "scale_color_datetime",
+    "scale_fill_binned", "scale_fill_distiller", "scale_fill_fermenter",
+    "scale_fill_ordinal", "scale_fill_steps", "scale_fill_steps2",
+    "scale_fill_stepsn", "scale_fill_viridis_b",
+    "scale_fill_date", "scale_fill_datetime",
+    # Time / identity / manual variants
+    "scale_x_time", "scale_y_time",
+    "scale_continuous_identity", "scale_discrete_identity", "scale_discrete_manual",
     # Coords
     "Coord", "CoordCartesian", "CoordFixed", "CoordFlip",
     "CoordPolar", "CoordQuickmap", "CoordRadial", "CoordTrans", "CoordTransform",
     "coord_cartesian", "coord_equal", "coord_fixed", "coord_flip",
     "coord_polar", "coord_quickmap", "coord_radial", "coord_sf", "coord_trans", "coord_transform",
     "CoordSf",
-    "coord_munch", "is_coord",
+    "coord_munch", "is_coord", "sf_transform_xy",
     # Facets
     "Facet", "FacetNull", "FacetGrid", "FacetWrap",
     "facet_null", "facet_grid", "facet_wrap", "is_facet", "wrap_dims",
     "max_height", "max_width",
+    "Layout",
     # Positions
     "Position", "PositionIdentity", "PositionDodge", "PositionDodge2",
     "PositionJitter", "PositionJitterdodge", "PositionNudge",
@@ -841,20 +902,31 @@ __all__ = [
     "guide_old_colourbar", "guide_old_colorbar",
     "guide_coloursteps", "guide_colorsteps", "guide_bins",
     "guide_custom", "guide_none", "guides", "is_guide",
+    "guide_axis_logticks", "guide_axis_stack", "guide_axis_theta",
+    "is_guides", "new_guide", "old_guide",
+    "guide_geom", "guide_train", "guide_merge", "guide_transform",
+    "guide_gengrob",
     # Themes
     "theme", "is_theme", "complete_theme",
     "theme_get", "theme_set", "theme_update", "theme_replace",
     "set_theme", "get_theme", "reset_theme_settings",
+    "update_theme", "replace_theme", "from_theme",
     "Element", "element_blank", "element_line", "element_rect",
     "element_text", "element_point", "element_polygon", "element_geom",
     "element_grob", "element_render", "merge_element",
-    "Margin", "margin", "Rel", "rel",
+    "el_def", "is_theme_element", "is_margin",
+    "Margin", "margin", "margin_auto", "margin_part", "Rel", "rel",
     "calc_element", "get_element_tree", "register_theme_elements",
     "theme_grey", "theme_gray", "theme_bw", "theme_linedraw",
     "theme_light", "theme_dark", "theme_minimal", "theme_classic",
     "theme_void", "theme_test",
+    "theme_sub_axis", "theme_sub_axis_x", "theme_sub_axis_y",
+    "theme_sub_axis_top", "theme_sub_axis_bottom",
+    "theme_sub_axis_left", "theme_sub_axis_right",
+    "theme_sub_legend", "theme_sub_panel", "theme_sub_plot",
+    "theme_sub_strip",
     # Labels, limits
-    "labs", "xlab", "ylab", "ggtitle",
+    "labs", "xlab", "ylab", "ggtitle", "update_labels",
     "lims", "xlim", "ylim", "expand_limits",
     # Annotations
     "annotate", "annotation_custom", "annotation_raster", "annotation_logticks",
@@ -881,8 +953,13 @@ __all__ = [
     "update_geom_defaults", "update_stat_defaults",
     "reset_geom_defaults", "reset_stat_defaults",
     "get_geom_defaults",
+    "make_constructor",
     "unit", "arrow", "alpha",
     "PT", "STROKE", "zeroGrob",
+    # Submodule namespaces and remaining R-exported helpers already
+    # defined at top level (just need to surface for ``import *``).
+    "stat", "labeller",
+    "derive", "flip_data", "flipped_names", "has_flipped_aes",
     # Plugin discovery
     "discover_extensions", "list_extensions",
 ]
